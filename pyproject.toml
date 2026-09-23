@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "pybind11>=2.10", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lrfhss"
+version = "0.1.0"
+description = "Blind LR-FHSS receiver: detects, synchronises and decodes LR-FHSS packets from raw IQ"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+dependencies = [
+    "numpy>=1.21,<2",
+    "scipy>=1.9",
+]
+
+[project.optional-dependencies]
+# Only needed for plot_packet_spectrogram(); imported lazily so a decode
+# never pays matplotlib's ~320 ms import.
+plots = ["matplotlib>=3.5"]
+test = ["pytest>=7"]
+
+[tool.setuptools]
+# The compiled core is built into the package as lrfhss._viterbi_ext, so
+# `import lrfhss` works from anywhere once installed. It used to be a
+# top-level lrfhss_viterbi_ext.so that had to sit on sys.path beside the
+# package, which is why the examples needed a sys.path bootstrap.
+packages = ["lrfhss", "lrfhss.phy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
