@@ -1,4 +1,4 @@
-# lrfhss
+# PyLR-FHSS
 
 A blind LR-FHSS receiver. Given raw IQ, it finds packets without being told
 where they are: matched-filter sync search, header decode, then the
