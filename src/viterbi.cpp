@@ -216,14 +216,19 @@ py::tuple viterbi_payload_full(
             int n_periods = (n_kept + kept_per - 1) / kept_per;
             mother.assign((size_t)n_periods * period, 128.0);
             int ki = 0;
+            int end = 0;
             for (int p = 0; p < n_periods; ++p) {
                 for (int j = 0; j < period; ++j) {
                     if (full_matrix[j] == 1 && ki < n_kept) {
                         mother[(size_t)p*period + j] = q[ki]; ki++;
+                        end = p*period + j + 1;
                     }
                 }
             }
-            int keep_len = ((int)mother.size() / 3) * 3;
+            // Stop at the last kept bit rounded up to a whole trellis step,
+            // not at the end of the padded period -- see the numpy version
+            // in lrfhss/phy/fec.py for why.
+            int keep_len = (end + 2) / 3 * 3;
             mother.resize(keep_len);
         }
 

@@ -86,7 +86,7 @@ class ClusterPruner:
         makes this work on same-batch siblings.
         """
         t_lo, t_hi, freqs = footprint
-        n = 0
+        gone = []
         for cj in range(len(clusters)):
             if cj == keep or self.decoded[cj] or self.retired[cj]:
                 continue
@@ -94,8 +94,16 @@ class ClusterPruner:
             if t_lo <= tj <= t_hi and any(abs(fj-p) < 1500 for p in freqs):
                 self.submitted[cj] = True
                 self.retired[cj] = True
-                n += 1
-        return n
+                gone.append(cj)
+        return gone
+
+    def restore(self, clusters_idx):
+        """Undo a retirement: the candidate that caused it failed its
+        payload, so its siblings -- other locks on the same packet, often
+        better aligned in time -- still deserve their turn."""
+        for cj in clusters_idx:
+            self.retired[cj] = False
+            self.submitted[cj] = False
 
 
 def _header_matches_known_config(hdr):
@@ -137,11 +145,19 @@ def evaluate(iq, acq, results, clusters=None, pruner=None, ci=None,
     report.candidate(acq['fstart'], acq['fhf'], acq['fcorr'], hdr)
 
     footprint = _packet_footprint(hdr, acq['hwin'], acq['hf_precise'])
+    retired_now = []
     if footprint is not None and pruner is not None and clusters is not None:
-        report.retired(pruner.retire_predicted(clusters, footprint, ci))
+        retired_now = pruner.retire_predicted(clusters, footprint, ci)
+        report.retired(len(retired_now))
 
     payload_bytes, crc_ok = decode_payload_at(iq, hdr, acq['hwin'], acq['hf_precise'])
     report.payload(crc_ok, payload_bytes)
+    if not crc_ok and retired_now:
+        # Retirement was provisional on this packet decoding. It didn't --
+        # typically a lock placed badly in time -- so give the other locks
+        # on the same packet their turn; which one is decided first then
+        # stops deciding whether the packet is found at all.
+        pruner.restore(retired_now)
 
     if crc_ok:
         if not _header_matches_known_config(hdr):

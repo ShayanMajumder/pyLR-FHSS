@@ -1,0 +1,115 @@
+# ---- This repo ----------------------------------------------------------
+# Kept locally, not part of this repo
+python-softlora/
+simulations/
+
+# ---- Virtual environments -----------------------------------------------
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+__pypackages__/
+.pdm-python
+.pdm-build/
+.pixi/
+
+# Secrets and local settings
+.env
+.envrc
+.pypirc
+local_settings.py
+
+# ---- Byte-compiled / optimised files ------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ---- C / C++ extensions (lrfhss._viterbi_ext is rebuilt from src/) ------
+*.so
+*.pyd
+*.dll
+*.dylib
+*.o
+*.obj
+
+# ---- Packaging: `pip install -e .` / `setup.py build_ext` regenerate these
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---- Tests and coverage -------------------------------------------------
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+cover/
+
+# ---- Type checkers and linters ------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+cython_debug/
+
+# ---- Notebooks and IPython ----------------------------------------------
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
+
+# ---- Documentation builds -----------------------------------------------
+docs/_build/
+/site
+
+# ---- Logs, profiling, scratch -------------------------------------------
+*.log
+*.prof
+*.lprof
+
+# ---- Editors and OS -----------------------------------------------------
+.vscode/
+.idea/
+.spyderproject
+.spyproject
+.ropeproject
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

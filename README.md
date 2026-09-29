@@ -4,11 +4,34 @@ A blind LR-FHSS receiver. Given raw IQ, it finds packets without being told
 where they are: matched-filter sync search, header decode, then the
 LFSR-predicted hop schedule to gather and decode the payload.
 
-![One decoded packet](examples/plots/packet_spectrogram.png)
+![The bundled recording, decoded](examples/plots/packet_spectrogram.png)
 
-The bundled recording, decoded and drawn by `examples/decode_recording.py`:
-three header replicas (red), then three payload fragments (cyan), each boxed
-where the receiver found it.
+![The same recording at -22 dB SNR, still decoded](examples/plots/packet_SNR_-22.png)
+
+Both are the bundled recording, a real over-the-air packet carrying
+"hello world", decoded and drawn by `examples/decode_recording.py`. Each box
+marks where the receiver found a header replica (red) or a payload fragment
+(cyan).
+
+- **Top: as captured.** Three header replicas, then three payload fragments,
+  each a narrow line on its own hop frequency.
+- **Bottom: buried in noise.** The same capture with white noise added down
+  to -22 dB SNR, so the signal is about 160 times weaker than the noise in a
+  125 kHz reference bandwidth. The packet is invisible, yet the receiver
+  still finds it without being told where to look, locks onto it and decodes
+  the payload with a passing CRC. The boxes land where they did in the clean
+  capture.
+
+Why it survives: each hop is only about 488 Hz wide. Filtering down to one
+hop throws away 99.6% of the noise in 125 kHz, which leaves an SNR of about
++2 dB inside the hop. The header is sent three times and the copies are
+combined, and the payload is protected by convolutional coding and a CRC.
+For comparison, LoRa's most robust setting, SF12, is specified down to
+-20 dB SNR.
+
+-22 dB is near this packet's limit, so whether it decodes depends on the
+noise draw. To try it, set `SNR_DB` and `NOISE_SEED` at the top of the
+script.
 
 ## Install
 
@@ -67,8 +90,7 @@ iq, meta = lrfhss.encode(b'hello world', bw_khz=722.66, CR=0)
 ```
 
 The encoder reuses the decoder's own trellis, CRC, whitening and interleaver,
-so the two are compatible by construction. Known bug, pinned by a strict
-xfail: CR=0 generation depends on payload content (see `lrfhss/encoder.py`).
+so the two are compatible by construction.
 
 ## Examples
 
@@ -86,7 +108,7 @@ hear.
 ## Tests
 
 ```bash
-pytest              # 88 tests, ~55 s
+pytest              # 97 tests, ~50 s
 ```
 
 Self-contained: nothing is skipped and nothing needs external data.
@@ -110,3 +132,20 @@ examples/      runnable scripts
 `arbitrate` is the one to read first if you are changing behaviour: one
 physical packet appears as several candidates, and deciding which are real is
 where this receiver has historically gone wrong.
+
+## Collaboration and support
+
+Open to collaborations :) If you would like some personal support replicating
+these results, let me know: [shayan.majumder2@gmail.com](mailto:shayan.majumder2@gmail.com).
+
+## Acknowledgements
+
+Thanks to the [Microwaves and Engineering group](https://microwaves.site.hw.ac.uk/)
+at Heriot-Watt University for supporting this work, and to
+[jumanamirza/LR-FHSS-receiver](https://github.com/jumanamirza/LR-FHSS-receiver) for making her work open source.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
+
+Shayan Majumder <shayan.majumder2@gmail.com>

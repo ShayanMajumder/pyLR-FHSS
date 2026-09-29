@@ -6,7 +6,7 @@ import numpy as np
 from . import config as cfg
 from .phy.hopping import calculate_freq_from_hop_seq_id
 from .phy.fec import bits_to_bytes, deinterleave_payload, dewhiten_payload, viterbi_decode_payload
-from .phy.gmsk import demod_symbols
+from .phy.gmsk import demod_symbols, msk_trellis_llr
 from .dsp import cached_butter, mix_and_filtfilt
 from .fft import _fft
 from .header import _valid_bw, detect_replica_index
@@ -69,6 +69,117 @@ def _chase_payload_fallback(soft_stream, data_in_bitcount, CR, max_single=10, ma
     return None, False
 
 
+def _common_fragment_cfo(segs, predicted_hz, max_off_hz=350.0):
+    """Shared carrier offset of the payload fragments, from all of them at once.
+
+    Each fragment's carrier is its LFSR-predicted hop plus ONE offset that
+    every fragment shares (the header-frequency measurement error -- up to
+    ~240 Hz on synthetic packets, identical across fragments). Estimating
+    it per fragment from the FFT peak does not work: a GMSK burst's
+    spectral peak moves with its bit content, by -140..+120 Hz
+    independently per fragment, which no shared +/-30 Hz dcfo nudge can
+    undo. CR 1/3 absorbs the one fragment that lands badly; CR 2/3 (DR9)
+    cannot, which is what capped DR9 at ~80% even at high SNR.
+
+    Squaring removes the data: with h = 1/2 the squared signal is h = 1
+    CPFSK, which carries discrete lines at 2*off +/- Rs/2 whatever the
+    bits are. Each fragment is mixed to its predicted hop, low-passed,
+    squared; the power spectra are summed across fragments, and the offset
+    is where the PAIR of lines is strongest. Returns Hz, or None if there
+    is nothing to estimate from.
+    """
+    rs = cfg.SYMBOL_RATE_HZ
+    sos = cached_butter(4, (max_off_hz + rs)/(cfg.FS/2))
+    lens = [len(s) for s, _ in zip(segs, predicted_hz) if len(s) >= cfg.SMBL*3]
+    if not lens:
+        return None
+    nfft = 1 << int(np.ceil(np.log2(max(lens)*4)))
+    acc = np.zeros(nfft)
+    for seg, f0 in zip(segs, predicted_hz):
+        if len(seg) < cfg.SMBL*3:
+            continue
+        b = mix_and_filtfilt(sos, seg, f0)
+        acc += np.abs(np.fft.fft(b*b, nfft))**2
+    ff = np.fft.fftfreq(nfft, 1/cfg.FS)
+    order = np.argsort(ff)
+    ff, acc = ff[order], acc[order]
+    two_off = np.arange(-2*max_off_hz, 2*max_off_hz + 1e-9, 1.0)
+    score = (np.interp(two_off - rs/2, ff, acc) +
+             np.interp(two_off + rs/2, ff, acc))
+    return float(two_off[np.argmax(score)]/2)
+
+
+def _fragment_weights(seg_set, half_bw_hz=300.0):
+    """Per-fragment reliability in [0, 1], for erasure-aware soft decoding.
+
+    The demodulator turns ANY input into soft bits: a fragment that was
+    wiped out (collision, fade, jammer, end of capture) still yields
+    phase slopes, and noise slopes clip to +/-1 as often as real bits do.
+    Fed to Viterbi at full weight, that is confident garbage -- the reason
+    the receiver needed 5 of 7 DR8 fragments when CR 1/3 can in principle
+    recover from 3.
+
+    Weight = SNR/(1+SNR), the usual LLR scaling, with SNR measured as the
+    excess power within +/-half_bw_hz of the fragment's carrier over the
+    capture's median per-bin noise. Under plain AWGN every fragment gets
+    about the same weight, and a uniform scale leaves Viterbi's decision
+    unchanged; an empty fragment gets ~0 and becomes an erasure.
+    """
+    w = []
+    for seg, fc, _ in seg_set:
+        if len(seg) < cfg.SMBL*3:
+            w.append(0.0)
+            continue
+        S = np.abs(_fft(seg*np.hanning(len(seg))))**2
+        ff = np.fft.fftfreq(len(seg), 1/cfg.FS)
+        band = np.abs(ff - fc) <= half_bw_hz
+        noise = np.median(S) + 1e-30
+        snr = max(S[band].sum() - band.sum()*noise, 0.0)/(band.sum()*noise)
+        w.append(snr/(1.0 + snr))
+    return np.array(w)
+
+
+def _trellis_payload(seg_set, wts, data_in_bitcount, CR, sos):
+    """Payload decode with the phase-tracking trellis demodulator
+    (phy.gmsk.msk_trellis_llr), ~2.5 dB beyond the differential one.
+
+    It tolerates +/-0.23 symbol of timing error but only ~+/-5-10 Hz of
+    frequency error, so the shared (dcfo, gsto) search runs a fine
+    frequency grid and a coarse timing one: TRELLIS_DCFO_HZ x 3 timings,
+    all hypotheses for a fragment in one batched trellis call. CRC16
+    gates every candidate, as in the rest of the search.
+    """
+    spb = cfg.FS/cfg.SYMBOL_RATE_HZ
+    dcfos = list(cfg.TRELLIS_DCFO_HZ)
+    gstos = [0, int(round(cfg.SMBL/3)), int(round(2*cfg.SMBL/3))]
+    hyps = [(d, g) for d in dcfos for g in gstos]
+    per_frag = []
+    for fi, (seg, fc, nbits) in enumerate(seg_set):
+        if len(seg) < cfg.SMBL*3:
+            per_frag.append(np.zeros((len(hyps), nbits)))
+            continue
+        # Tune and filter once; each dcfo is applied by the trellis as a
+        # rotation of just the samples it uses.
+        # mids[0] is the fragment's leading pad bit (a known 0)
+        base = cfg.LOOKDIST + np.round(np.arange(nbits + 1)*spb).astype(int)
+        if cfg.FILTER_ONCE:
+            tuned = mix_and_filtfilt(sos, seg, fc)
+            llr = msk_trellis_llr([(tuned, g + base, d) for d, g in hyps], first_bit=0)
+        else:
+            tuned = {d: mix_and_filtfilt(sos, seg, fc + d) for d in dcfos}
+            llr = msk_trellis_llr([(tuned[d], g + base) for d, g in hyps], first_bit=0)
+        per_frag.append(llr*wts[fi])
+    for h in range(len(hyps)):
+        s = np.concatenate([pf[h] for pf in per_frag])[:data_in_bitcount]
+        scale = 2*np.median(np.abs(s)) + 1e-12
+        soft = np.clip(s/scale, -1, 1)
+        info, match = viterbi_decode_payload(
+            deinterleave_payload(soft, data_in_bitcount), CR=CR)
+        if match:
+            return info, True
+    return None
+
+
 def _packet_slots(iq, hdr, hdr_win_start, hdr_f_measured):
     """Structured per-slot layout for spectrogram annotation: returns a list
     of dicts, one per header replica and payload fragment, each with
@@ -127,7 +238,9 @@ def decode_payload_at(iq, hdr, hdr_win_start, hdr_f_measured):
     # it wasted since there's no real payload there to find. Real PASS
     # cases finish well inside this budget (worst observed: 6.15s on real
     # capture); this only clips the FAIL tail.
-    t_budget_start = time.time()
+    # monotonic, not wall clock: a machine that sleeps mid-decode must not
+    # use up the budget (it did, and lost packets).
+    t_budget_start = time.monotonic()
 
     def try_thishdridx(thishdridx):
         if pll is None:
@@ -214,66 +327,103 @@ def decode_payload_at(iq, hdr, hdr_win_start, hdr_f_measured):
         # (At -10dB the density collapses to 1/21522 -- a true needle -- which
         # is exactly why the fine fallback has to stay: the coarse tier is a
         # speed path for workable SNR, not a replacement for the full search.)
-        for gsto_step in cfg.GSTO_TIERS:
-            for dcfo in range(-30, 31, 5):
-              if time.time() - t_budget_start > cfg.PAYLOAD_TIME_BUDGET_S:
-                  return _chase_payload_fallback(best_stream[0], data_in_bitcount, CR)
-              tfs = []
-              for seg, fc, nbits in segs:
-                  if len(seg) < cfg.SMBL*3:
-                      tfs.append((None, nbits))
-                      continue
-                  tf = mix_and_filtfilt(sos, seg, fc+dcfo)
-                  tfs.append((tf, nbits))
-              # Hoist the entire gsto sweep into one C++ call per fragment
-              # (demod_symbols_grid) instead of one demod_symbols call per
-              # (fragment, gsto). Measured 343,966 demod_symbols_ext calls /
-              # 3.455s on a -10dB run for ~50 sample centers each -- almost
-              # entirely per-call pybind11 dispatch + allocation, not phase
-              # arithmetic. Same math per row (validated bit-exact, 0.0 diff
-              # over 200 randomized trials including truncated fragments),
-              # 114x fewer boundary crossings.
-              gsto_list = np.arange(0, cfg.SMBL, gsto_step, dtype=np.int64)
-              frag_grids = []
-              for tf, nbits in tfs:
-                  if tf is None:
-                      frag_grids.append((None, nbits))
-                      continue
-                  if cfg._HAVE_VEXT_LOCAL:
-                      grid, gvalid = cfg._vext_local.demod_symbols_grid(
-                          np.ascontiguousarray(tf, dtype=np.complex128),
-                          gsto_list, cfg.LOOKDIST, cfg.PHASESLOPE, int(nbits), int(cfg.SMBL),
-                          True, 1.0)
-                      frag_grids.append((np.asarray(grid), nbits))
-                  else:
-                      frag_grids.append((None, nbits))   # fall back per-gsto below
-
-              for gi, gsto in enumerate(gsto_list):
-                  if time.time() - t_budget_start > cfg.PAYLOAD_TIME_BUDGET_S:
+        # Starting carrier per fragment. First choice: the predicted hop plus
+        # one offset shared by every fragment, estimated from all of them
+        # together (_common_fragment_cfo) -- data-independent, so it does
+        # not inherit the per-fragment FFT-peak bias. The per-fragment FFT
+        # peaks stay as a second choice, so a packet the old search
+        # decoded is still decoded; the extra pass only runs when the
+        # first finds no CRC16 pass.
+        seg_sets = []
+        n_pred = 0
+        if predicted_hop_hz is not None and len(predicted_hop_hz) >= len(segs):
+            # The header carrier now comes from its sync word to ~1 Hz, and
+            # header and payload share one oscillator, so the predicted
+            # hops are usually right as they stand: try them first.
+            seg_sets.append([(seg, predicted_hop_hz[fi], nbits)
+                             for fi, (seg, _, nbits) in enumerate(segs)])
+            off = _common_fragment_cfo([s for s, _, _ in segs],
+                                       predicted_hop_hz[:len(segs)])
+            if off is not None:
+                seg_sets.append([(seg, predicted_hop_hz[fi] + off, nbits)
+                                 for fi, (seg, _, nbits) in enumerate(segs)])
+            n_pred = len(seg_sets)
+        seg_sets.append(segs)
+        for si, seg_set in enumerate(seg_sets):
+            # Erasure-aware: scale each fragment's soft bits by its measured
+            # reliability, normalised so the best fragment keeps full scale.
+            wts = _fragment_weights(seg_set)
+            wts = wts/wts.max() if wts.max() > 0 else np.ones(len(seg_set))
+            # Trellis first on the predicted-carrier sets (plain, then with
+            # the shared offset): their carriers are right to a few Hz,
+            # which is what the trellis needs. The differential search
+            # below stays as the fallback.
+            if cfg.PAYLOAD_TRELLIS and si < n_pred:
+                res = _trellis_payload(seg_set, wts, data_in_bitcount, CR, sos)
+                if res is not None:
+                    return res
+            if not cfg.PAYLOAD_OLD_FALLBACK:
+                continue
+            for gsto_step in cfg.GSTO_TIERS:
+                for dcfo in range(-30, 31, 5):
+                  if time.monotonic() - t_budget_start > cfg.PAYLOAD_TIME_BUDGET_S:
                       return _chase_payload_fallback(best_stream[0], data_in_bitcount, CR)
-                  parts = []
-                  for (grid, nbits), (tf, _nb) in zip(frag_grids, tfs):
-                      if grid is not None:
-                          parts.append(grid[gi])
+                  tfs = []
+                  for seg, fc, nbits in seg_set:
+                      if len(seg) < cfg.SMBL*3:
+                          tfs.append((None, nbits))
                           continue
+                      tf = mix_and_filtfilt(sos, seg, fc+dcfo)
+                      tfs.append((tf, nbits))
+                  # Hoist the entire gsto sweep into one C++ call per fragment
+                  # (demod_symbols_grid) instead of one demod_symbols call per
+                  # (fragment, gsto). Measured 343,966 demod_symbols_ext calls /
+                  # 3.455s on a -10dB run for ~50 sample centers each -- almost
+                  # entirely per-call pybind11 dispatch + allocation, not phase
+                  # arithmetic. Same math per row (validated bit-exact, 0.0 diff
+                  # over 200 randomized trials including truncated fragments),
+                  # 114x fewer boundary crossings.
+                  gsto_list = np.arange(0, cfg.SMBL, gsto_step, dtype=np.int64)
+                  frag_grids = []
+                  for tf, nbits in tfs:
                       if tf is None:
-                          parts.append(np.zeros(nbits, dtype=float))
+                          frag_grids.append((None, nbits))
                           continue
-                      centers = gsto + cfg.LOOKDIST + np.arange(nbits+2)*cfg.SMBL
-                      centers_valid = centers[centers < len(tf)-cfg.LOOKDIST]
-                      if len(centers_valid) < nbits+1:
-                          parts.append(np.zeros(nbits, dtype=float))
-                          continue
-                      sb = demod_symbols(tf, centers_valid, cfg.LOOKDIST, cfg.PHASESLOPE)
-                      parts.append(sb[1:1+nbits])
-                  soft_stream = np.concatenate(parts)[:data_in_bitcount]
-                  deint = deinterleave_payload(soft_stream, data_in_bitcount)
-                  info, match = viterbi_decode_payload(deint, CR=CR)
-                  if match:
-                      return info, True
-                  bim = np.mean(np.abs(soft_stream) > 0.5)
-                  if bim > best_stream[1]:
-                      best_stream[0] = soft_stream; best_stream[1] = bim
+                      if cfg._HAVE_VEXT_LOCAL:
+                          grid, gvalid = cfg._vext_local.demod_symbols_grid(
+                              np.ascontiguousarray(tf, dtype=np.complex128),
+                              gsto_list, cfg.LOOKDIST, cfg.PHASESLOPE, int(nbits), int(cfg.SMBL),
+                              True, 1.0)
+                          frag_grids.append((np.asarray(grid), nbits))
+                      else:
+                          frag_grids.append((None, nbits))   # fall back per-gsto below
+
+                  for gi, gsto in enumerate(gsto_list):
+                      if time.monotonic() - t_budget_start > cfg.PAYLOAD_TIME_BUDGET_S:
+                          return _chase_payload_fallback(best_stream[0], data_in_bitcount, CR)
+                      parts = []
+                      for fi, ((grid, nbits), (tf, _nb)) in enumerate(zip(frag_grids, tfs)):
+                          if grid is not None:
+                              parts.append(grid[gi]*wts[fi])
+                              continue
+                          if tf is None:
+                              parts.append(np.zeros(nbits, dtype=float))
+                              continue
+                          centers = gsto + cfg.LOOKDIST + np.arange(nbits+2)*cfg.SMBL
+                          centers_valid = centers[centers < len(tf)-cfg.LOOKDIST]
+                          if len(centers_valid) < nbits+1:
+                              parts.append(np.zeros(nbits, dtype=float))
+                              continue
+                          sb = demod_symbols(tf, centers_valid, cfg.LOOKDIST, cfg.PHASESLOPE)
+                          parts.append(sb[1:1+nbits]*wts[fi])
+                      soft_stream = np.concatenate(parts)[:data_in_bitcount]
+                      deint = deinterleave_payload(soft_stream, data_in_bitcount)
+                      info, match = viterbi_decode_payload(deint, CR=CR)
+                      if match:
+                          return info, True
+                      bim = np.mean(np.abs(soft_stream) > 0.5)
+                      if bim > best_stream[1]:
+                          best_stream[0] = soft_stream; best_stream[1] = bim
         return _chase_payload_fallback(best_stream[0], data_in_bitcount, CR)
 
     # Cheap default order, not detect_replica_index (that costs ~2-3s/packet
@@ -286,7 +436,12 @@ def decode_payload_at(iq, hdr, hdr_win_start, hdr_f_measured):
         if pll is not None:
             addval_check = hdr_f_measured - pll[k-1]*step
             predicted_check = [p*step + addval_check for p in pll[cfg.HDR_COUNT:]]
-            if any(abs(p) > cfg.ALLBW/2 for p in predicted_check):
+            # Tolerance: a hop can sit right at the band edge, and a carrier
+            # estimate a few tens of Hz off then put it just outside -- a
+            # hard edge here rejected the right guess by 8 Hz on a real
+            # capture (case079). Wrong guesses miss by whole grid steps
+            # (>= 3.9 kHz), so HOP_EDGE_TOL_HZ still rejects them.
+            if any(abs(p) > cfg.ALLBW/2 + cfg.HOP_EDGE_TOL_HZ for p in predicted_check):
                 continue
         res = try_thishdridx(k)
         if res is None:

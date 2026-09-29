@@ -20,7 +20,7 @@ from .detect import (_fine_sync, find_packets, find_packets_windowed,
                      find_packets_streaming_interleaved)
 from .dsp import notch_spurs
 from .frontend import load_frontend
-from .header import decode_header_at
+from .header import _sync_carrier, decode_header_at, header_fft_peak
 
 
 def detect(iq, windowed_scan=False, window_sec=0.1, hop_sec=0.05):
@@ -107,6 +107,27 @@ def acquire_one(iq, t0, hf):
     CFO, the header (or None), and the window it was read from.
     """
     fcorr, fhf, fstart, fcfo = _fine_sync(iq, int(t0), int(hf))
+    # Sync-word score (header._sync_carrier): the known sync word, removed,
+    # leaves a tone whose FFT peak stands above the band on a real header.
+    # It RANKS candidates for the decisions (the matched-filter score lets
+    # noise outrank a weak real packet) and, below SYNC_SKIP_Q, skips the
+    # header decode. Measured on DR8: noise <= 12.5 (99% <= 11.4), locks
+    # aligned on a real header >= 22 down to -26 dB; real locks that fine
+    # sync placed badly in time score ~5 but no header decode recovers
+    # those anyway. Searched +/-400 Hz around the header burst's own FFT
+    # peak (header_fft_peak), as the header decode does: fine sync's
+    # frequency can be several symbol rates (488 Hz) off.
+    win = fstart - cfg.SYNC_START_BIT*cfg.SMBL
+    ws = win if win >= 0 else fstart
+    f0 = header_fft_peak(iq[ws:ws + cfg.HDR_BIT_NUM*cfg.SMBL + 4*cfg.SMBL], fhf)
+    est = _sync_carrier(iq, win, f0 - 400, f0 + 400)
+    sync_q = est[2] if est is not None else float('inf')   # can't check: don't skip
+    if sync_q < cfg.SYNC_SKIP_Q:
+        # No sync word here: noise, or a lock too far off in time for any
+        # header decode to recover. Skip the decode -- at low SNR most
+        # candidates are like this, and the decode is the costly part.
+        return dict(t0=t0, hf=hf, fcorr=fcorr, fhf=fhf, fstart=fstart, fcfo=fcfo,
+                    hdr=None, hwin=win, hf_precise=fhf, sync_q=sync_q)
     hdr, soft, hwin, hf_precise = decode_header_at(iq, fhf, fstart, fcfo)
     return dict(t0=t0, hf=hf, fcorr=fcorr, fhf=fhf, fstart=fstart, fcfo=fcfo,
-                hdr=hdr, hwin=hwin, hf_precise=hf_precise)
+                hdr=hdr, hwin=hwin, hf_precise=hf_precise, sync_q=sync_q)

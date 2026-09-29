@@ -131,46 +131,18 @@ def test_two_packets_in_one_capture_are_both_found(quiet):
     assert b'first' in got and b'second' in got
 
 
-@pytest.mark.xfail(strict=True, reason='encoder CR=0 (5/6) is content-dependent')
-def test_punctured_rate_survives_arbitrary_payload_content(quiet):
-    """CR=0 still depends on what the bytes are, and should not.
+@pytest.mark.parametrize('CR', [0, 1, 2, 3])
+def test_every_coding_rate_survives_arbitrary_payloads(CR, quiet):
+    """Random lengths and contents, not just the one message above.
 
-    Measured over 24 random payloads at essentially zero noise, after the
-    BW=488.28125 fix:
-
-        CR=0  2/24      CR=1  24/24      CR=2  23/24      CR=3  24/24
-
-    So correcting the symbol rate fixed CR=1 (was 20/24) but left CR=0
-    untouched, and CR=2 is one short of clean. A correct encoder would be
-    24/24 everywhere at this noise level. Only CR=0 is asserted here
-    because it is the one that fails reliably; pinning the others either
-    way would make the suite flaky.
-
-    The FEC chain itself is exonerated: feeding the encoder's punctured,
-    interleaved bits straight into the decoder's deinterleaver and Viterbi
-    recovers the payload at every CR, so the fault is in the waveform or
-    the timing, not in puncturing.
-    """
-    CR = 0
-    rng = np.random.default_rng(11)
-    for _ in range(8):
-        n = int(rng.integers(1, 30))
-        msg = bytes(rng.integers(0, 256, n).tolist())
-        buf, _ = transmit(msg, CR=CR)
-        got, _ = payloads_of(buf)
-        assert msg in got, 'CR=%d failed on %d-byte payload' % (CR, n)
-
-
-@pytest.mark.parametrize('CR', [1, 3])
-def test_well_coded_rates_survive_arbitrary_payload_content(CR, quiet):
-    """Control for the test above: CR=1 and CR=3 are content-independent,
-    which is what localises the fault rather than blaming the encoder as
-    a whole. CR=2 is left out -- it is 23/24, so asserting it would
-    flake."""
+    CR=0 used to pass only for payload lengths with n % 5 == 1 -- 2 of 24
+    random payloads here -- because of a de-puncturing bug in the decoder
+    (pinned exactly by test_phy's FEC chain test). All four rates are
+    24/24 over 24 random payloads now."""
     rng = np.random.default_rng(11)
     for _ in range(6):
         n = int(rng.integers(1, 30))
         msg = bytes(rng.integers(0, 256, n).tolist())
         buf, _ = transmit(msg, CR=CR)
         got, _ = payloads_of(buf)
-        assert msg in got
+        assert msg in got, 'CR=%d failed on %d-byte payload' % (CR, n)

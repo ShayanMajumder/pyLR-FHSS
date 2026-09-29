@@ -85,6 +85,21 @@ def _cfar_detect(ratio, guard=cfg.CFAR_GUARD, factor=cfg.CFAR_FACTOR,
     return idx[ratio > thresholds]
 
 
+PRESCREEN_NFFT = 2048
+
+
+def mf_lpf_hz():
+    """Low-pass cutoff around a prescreen region before the sync matched
+    filter and fine sync. MF_LPF_HZ is the floor; above it, the cutoff has
+    to cover how far the region's frequency can be off -- half a prescreen
+    STFT bin plus half the rounding -- plus ~300 Hz of signal half-width.
+    The bin is FS/2048: 81 Hz at 166.7 kHz (DR8/DR9, so the floor rules
+    there), but 1465 Hz at 3 MHz (1523/1574 kHz), where a fixed 400 Hz
+    cutoff cut the signal away."""
+    err = cfg.FS/PRESCREEN_NFFT/2 + cfg.PRESCREEN_F_ROUND_HZ/2
+    return max(cfg.MF_LPF_HZ, err + 300.0)
+
+
 def _mf_scores(tuned):
     """Normalized sync-word matched-filter score per candidate start, maxed
     over CFO via FFT along the sync taps. Range [0,1], amplitude-independent
@@ -373,7 +388,7 @@ def find_packets(iq, floor_state=None):
     memory, since the carried state is a handful of floats, not the
     signal.
     """
-    nfft = 2048; hop = max(1, cfg.STAY_HDR//8)
+    nfft = PRESCREEN_NFFT; hop = max(1, cfg.STAY_HDR//8)
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -422,7 +437,8 @@ def find_packets(iq, floor_state=None):
     frame_idx, k_idx = np.where(top_val > 0)
     top_idx_full = bidx[top_local]
     region_set = set(zip((frame_idx*hop).tolist(),
-                         (np.round(f_axis[top_idx_full[frame_idx, k_idx]]/500)*500).tolist()))
+                         (np.round(f_axis[top_idx_full[frame_idx, k_idx]]/cfg.PRESCREEN_F_ROUND_HZ)
+                          *cfg.PRESCREEN_F_ROUND_HZ).tolist()))
     if not region_set:
         return []
     # O(n) grid-bucket dedup (was O(n^2) any()-scan against a growing list --
@@ -437,7 +453,8 @@ def find_packets(iq, floor_state=None):
             buckets[key] = (t_, f_)
     regions = list(buckets.values())
 
-    sos = cached_butter(4, 3000/(cfg.FS/2))
+    sos = cached_butter(4, mf_lpf_hz()/(cfg.FS/2))
+    sos_dc = cached_butter(4, max(mf_lpf_hz(), cfg.FINE_SYNC_LPF_HZ)/(cfg.FS/2))
     span = int(cfg.STAY_HDR*0.6)
     hits = []
     # Region scan is embarrassingly parallel -- each region is an
@@ -453,7 +470,13 @@ def find_packets(iq, floor_state=None):
         rt, rf = args
         lo = max(0, int(rt - span//2)); hi = min(len(iq), int(rt + span))
         seg = iq[lo:hi]
-        tuned = mix_and_filtfilt(sos, seg, rf)
+        # Near DC the prescreen places no regions (|f| < 2 kHz is skipped for
+        # the SDR's DC spike), so a hop there is only reachable from a region
+        # at the edge of that gap -- which takes the original wide filter.
+        # Narrow everywhere else. (Real capture: case077, header hop at
+        # 493 Hz, found only through the region at 2050 Hz.)
+        tuned = mix_and_filtfilt(sos_dc if abs(rf) < cfg.DC_GAP_REACH_HZ else sos,
+                                 seg, rf)
         starts, ratio = _mf_scores(tuned)
         if len(starts) == 0:
             return []
@@ -491,7 +514,14 @@ def _fine_sync(iq, t0_coarse, hf_coarse, t_span=None, coarse_div=4, topM=6):
     s_hi = min(len(iq), t0_coarse + t_span + cfg.STAY_HDR)
     seg = iq[s_lo:s_hi]
     seg = seg/np.sqrt(np.mean(np.abs(seg)**2) + 1e-30)
-    sos = cached_butter(4, 3000/(cfg.FS/2))
+    # Narrow like the matched filter (it is a large part of the low-SNR
+    # gain: restoring 3000 Hz everywhere cut DR8 at -22 dB from 47/48 to
+    # 20/48), except next to the DC gap, where the candidate sits at the
+    # gap's edge and the hop may be up to 2 kHz away (case077: 2050 Hz
+    # candidate, 493 Hz hop).
+    wide = abs(hf_coarse) < cfg.DC_GAP_REACH_HZ
+    sos = cached_butter(4, (max(mf_lpf_hz(), cfg.FINE_SYNC_LPF_HZ) if wide
+                            else mf_lpf_hz())/(cfg.FS/2))
     tuned = mix_and_filtfilt(sos, seg, hf_coarse)
     lim = len(tuned)-cfg.SYNC_OFF[-1]-1
     if lim <= 0:

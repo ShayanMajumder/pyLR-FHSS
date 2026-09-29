@@ -82,3 +82,30 @@ def test_longer_payloads_never_need_fewer_fragments():
     for cr in range(4):
         counts = [payload_fragments(n, cr) for n in range(1, 60)]
         assert counts == sorted(counts)
+
+
+@pytest.mark.parametrize('vext', [True, False], ids=['default', 'numpy'])
+@pytest.mark.parametrize('cr', [0, 1, 2, 3])
+def test_fec_chain_decodes_error_free_bits_at_every_length(cr, vext, monkeypatch):
+    """The encoder's coded bits straight into the decoder's deinterleaver
+    and Viterbi, no waveform in between.
+
+    CR=0 used to fail here on 4 payload lengths in 5 with no bit errors at
+    all: the de-puncturer padded the last 15-bit puncturing period out in
+    full, and the extra trellis steps moved where the CRC is read. Lengths
+    with n % 5 == 1, such as 'hello world', happen to fill the period,
+    which is why it passed for them and looked like an encoder bug that
+    depended on payload content."""
+    from lrfhss import encoder
+    monkeypatch.setattr(fec, '_HAVE_VEXT', fec._HAVE_VEXT and vext)
+    rng = np.random.default_rng(cr)
+    for n in range(1, 41):
+        wh = encoder._whiten_payload(rng.integers(0, 2, 8*n), n)
+        padded = np.concatenate([wh, fec.crc16(wh), np.zeros(6, int)])
+        coded = encoder._con_encode_payload(padded, cr)
+        # the decoder sizes the coded stream from the header with this
+        assert len(coded) == int(np.ceil(len(padded)*[6/5, 3/2, 2, 3][cr]))
+        rx = fec.deinterleave_payload(
+            encoder._interleave_payload(coded).astype(float), len(coded))
+        info, ok = fec.viterbi_decode_payload(2*rx - 1, CR=cr)
+        assert ok and np.array_equal(info, wh), 'CR=%d, %d bytes' % (cr, n)

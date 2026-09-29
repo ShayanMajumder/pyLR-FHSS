@@ -132,6 +132,70 @@ GSTO_TIERS = (GSTO_STEP_COARSE,)
     # replacement.
 PRESCREEN_K_SENSITIVE = 20
 MF_THRESH_SENSITIVE = 0.55
+# Low-pass cutoff (Hz) around each prescreen region before the sync
+# matched filter (find_packets). A hop is ~0.5
+# kHz wide. Was 3000, then 700: the floor was the prescreen rounding each
+# region's frequency to 500 Hz (up to 250 Hz off, plus the +/-250 Hz GMSK
+# deviation). With regions at their measured frequency (rounded to 50 Hz,
+# PRESCREEN_F_ROUND_HZ) the filter can hug the signal. Measured on DR8
+# with the sensitive threshold: true packet among the candidates at
+# -24 dB (125 kHz-referenced SNR) 11/16 -> 16/16, at -26 dB 4/16 -> 12/16,
+# ~32 candidates per 2 s capture either way.
+# This is the floor: at high sample rates the prescreen's frequency bins
+# are coarser and detect.mf_lpf_hz() widens the filter to match.
+MF_LPF_HZ = 400
+# The original wide filter, still used by the matched filter and fine sync
+# next to the DC gap (see DC_GAP_REACH_HZ): a candidate there sits at the
+# gap's edge while the hop may be up to 2 kHz inside it (real capture
+# case077). Elsewhere both use MF_LPF_HZ.
+FINE_SYNC_LPF_HZ = 3000
+# Prescreen regions within this of DC keep the wide FINE_SYNC_LPF_HZ filter
+# in the matched filter: the prescreen skips |f| < 2 kHz (SDR DC spike), so
+# a hop there is reachable only from a region at the gap's edge.
+DC_GAP_REACH_HZ = 3000
+PRESCREEN_F_ROUND_HZ = 50
+
+# GMSK soft demod (phy/gmsk.demod_symbols): False = phase difference of
+# the two samples at +/-LOOKDIST (the original); True = amplitude-weighted
+# mean phase increment over that window. The C++ demod implements only
+# the original, so True uses the numpy path.
+DEMOD_AVG_PHASE = False
+
+# Payload decode with the phase-tracking trellis demodulator first
+# (payload._trellis_payload), and its frequency grid around the shared
+# fragment offset. The trellis tolerates only ~+/-5-10 Hz of frequency
+# error, hence the 6 Hz step.
+PAYLOAD_TRELLIS = True
+HEADER_TRELLIS = True
+# Whether the original grid searches still run after the trellis paths
+# fail (header: df x cfo grid + backward + combined; payload: dcfo x gsto
+# differential search). Off: on 192 packets at the sensitivity edge (DR8
+# -22/-24 dB, DR9 -20/-22 dB) the receiver without them decoded 47/29/48/34
+# of 48 against 44/25/45/27 for the old-behaviour reference, at ~8x less
+# CPU; on the lost packets they rescued 1 in 7, at 2.5x the time.
+HEADER_OLD_FALLBACK = False
+PAYLOAD_OLD_FALLBACK = False
+# Speed switches for the trellis paths (see phy.gmsk.msk_trellis_llr):
+# TRELLIS_DECIM  correlate every D-th sample (0 = auto, ~20 per symbol);
+#                1: decimating cost packets at the edge and saved little
+# FILTER_ONCE    filter once, apply each frequency offset as a rotation
+# SYNC_ZOOM      exact zoomed (chirp-z) spectrum for narrow sync searches
+TRELLIS_DECIM = 1
+FILTER_ONCE = True
+SYNC_ZOOM = True
+# Header trellis: frequency grid around the sync-word carrier estimate,
+# and how far a replica's sync-word peak must stand above the band mean
+# (in power) to be combined.
+SYNC_DCFO_HZ = (-4, 0, 4)
+SYNC_MIN_Q = 20.0
+# ...and how far the LOCK's own sync-word peak must stand out before the
+# (costly) blind search for its other replicas is tried at all.
+SYNC_COMBINE_Q = 15.0
+# Candidates whose sync-word peak (+/-400 Hz around the header burst's FFT
+# peak) is below
+# this skip the header decode entirely (see acquire.acquire_one).
+SYNC_SKIP_Q = 10.0
+TRELLIS_DCFO_HZ = tuple(range(-24, 25, 6))
     # Fallback floor for _cfar_detect (see below) and the sensitive-tier
     # rescan trigger in main(). Was the sole detection gate before CFAR;
     # re-measured against actual recall instead of assumed -- on the real
@@ -179,6 +243,11 @@ DECIMS = (18, 9, 6, 4, 3, 2, 1)
 # 1.01x leaves ~2 kHz at the edge and the outermost hops fall off it
 # (bw=39.06 kHz failed at 1.01x, decodes at every factor from 1.05x up).
 ALLBW_MARGIN = 1.25
+# How far past +/-ALLBW/2 a PREDICTED hop centre (or a blind replica
+# search) may go. A hop can sit right at the band edge and a carrier
+# estimate tens of Hz off then puts it just outside; wrong replica guesses
+# miss by whole grid steps (>= 3.9 kHz), so this still rejects them.
+HOP_EDGE_TOL_HZ = 1000.0
 
 
 def pick_decim(bw_hz, fs_capture=None, margin=1.05):

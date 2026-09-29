@@ -84,6 +84,24 @@ _TONE_LRU = OrderedDict()
 _TONE_LRU_CAP = 200   # see _tone's docstring: simulated against the real
 
 
+_TONE_BLOCK = 512
+
+
+def _block_tone(w, length):
+    """exp(1j*w*n), n = 0..length-1, as one block of B phases times a
+    per-block rotation: exp(1j*w*(bB + i)) = exp(1j*w*bB)*exp(1j*w*i). One
+    complex multiply per sample instead of a cos and a sin; the two short
+    exps are exact, so the product agrees with direct evaluation to ~1e-15.
+    Since prescreen regions sit at their measured frequency (50 Hz steps
+    rather than 500), the tone cache below misses far more often, which
+    made per-sample trig the single biggest cost of detection."""
+    B = _TONE_BLOCK
+    nb = -(-length//B)
+    base = np.exp(1j*w*np.arange(B))
+    rot = np.exp(1j*(w*B)*np.arange(nb))
+    return (rot[:, None]*base[None, :]).ravel()[:length]
+
+
 def _tone(freq_hz, length):
     """exp(-2j*pi*freq_hz*n/FS) for n=0..length-1, via cos/sin written
     directly into the output's real/imag views (0.325ms vs 0.600ms for
@@ -109,15 +127,14 @@ def _tone(freq_hz, length):
     ~0.0004ms/op, negligible against the ~0.325ms/call tone-generation
     cost a hit avoids.
     """
-    key = (round(float(freq_hz), 1), int(length))
+    # FS is part of the key: after retune() to another rate, the same
+    # (frequency, length) is a different tone.
+    key = (round(float(freq_hz), 1), int(length), float(cfg.FS))
     cached = _TONE_LRU.get(key)
     if cached is not None:
         _TONE_LRU.move_to_end(key)
         return cached
-    ph = (-2.0*np.pi*float(freq_hz)/cfg.FS)*np.arange(length)
-    t = np.empty(length, dtype=np.complex128)
-    np.cos(ph, out=t.real)
-    np.sin(ph, out=t.imag)
+    t = _block_tone(-2.0*np.pi*float(freq_hz)/cfg.FS, int(length))
     _TONE_LRU[key] = t
     _TONE_LRU.move_to_end(key)
     if len(_TONE_LRU) > _TONE_LRU_CAP:

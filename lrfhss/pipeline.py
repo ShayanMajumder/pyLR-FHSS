@@ -70,7 +70,10 @@ def _decode_clusters(iq, clusters, opts):
         acquired[ci] = acquire_one(iq, clusters[ci][1], clusters[ci][2])
     n_sync = len(acquired)
 
-    for ci in sorted(order, key=lambda c: -acquired[c]['fcorr']):
+    # Strongest sync-word evidence first (acquire_one's sync_q), refined
+    # correlation as the tie-break.
+    for ci in sorted(order, key=lambda c: (-acquired[c].get('sync_q', 0.0),
+                                           -acquired[c]['fcorr'])):
         if len(results) >= opts.max_packets:
             break
         # Retirement still pays: it skips the payload decode, which is far

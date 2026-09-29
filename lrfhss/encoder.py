@@ -28,15 +28,12 @@ Timing and rates come from `config`, so retune() moves the encoder and
 the decoder together.
 
 Round trips at every bandwidth in the hop tables, at header-replica
-counts 1-4, and at every LoRaWAN data rate.
+counts 1-4, at every coding rate and at every LoRaWAN data rate.
 
-KNOWN BUG, covered by a strict xfail in tests/test_roundtrip.py: CR=0
-(5/6) depends on payload CONTENT. Over 24 random payloads at essentially
-zero noise it round trips twice, against 24/24 for CR=1 and CR=3 and
-23/24 for CR=2. The FEC chain is exonerated -- feeding the punctured,
-interleaved bits straight into the decoder recovers the payload at every
-CR -- so the fault is in the waveform or its timing. Generation only;
-decoding real CR=0 captures from the hardware transmitter is unaffected.
+CR=0 (5/6) was long listed here as an encoder bug that depended on
+payload content. It was the decoder: its de-puncturer mishandled a
+partial last puncturing period, so CR=0 failed on 4 payload lengths in 5
+(see phy/fec.py). This encoder was correct throughout.
 """
 import numpy as np
 

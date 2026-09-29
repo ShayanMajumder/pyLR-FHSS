@@ -213,11 +213,20 @@ def viterbi_decode_payload(deint_payload, CR, demod_soft_val_cap=1):
         n_periods = int(np.ceil(n_kept / kept_per))
         mother = np.full(n_periods*period, 128.0)
         ki = 0
+        end = 0
         for p in range(n_periods):
             for j in range(period):
                 if pat[j] == 1 and ki < n_kept:
                     mother[p*period+j] = q[ki]; ki += 1
-        mother = mother[:(len(mother)//3)*3]
+                    end = p*period + j + 1
+        # The mother stream is 3 bits per trellis step, so it rarely fills
+        # its last puncturing period. It ends within 2 bits of the last
+        # kept one for every pattern above, so round that up to a whole
+        # step. Padding to the whole period instead added phantom steps,
+        # which moved where the CRC is read from the end: CR=0 failed on 4
+        # payload lengths in 5, even error-free. CR=1 and CR=2 happen to
+        # always end on a period.
+        mother = mother[:-(-end//3)*3]
 
     nsyms = len(mother)//3
     INF = 1e18
