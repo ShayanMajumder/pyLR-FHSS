@@ -1,10 +1,6 @@
-"""LoRaWAN data rates.
-
-A DR names a whole LR-FHSS configuration. The part that matters for this
-receiver is the header-replica count: it is not carried in the header, so
-it has to come from somewhere, and for standards-compliant traffic the DR
-is where.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""LoRaWAN data rates."""
 import io
 import contextlib
 
@@ -42,7 +38,8 @@ def test_datarate_table_matches_the_regional_parameters(region, dr, bw_khz,
 
 def test_the_slower_rate_of_a_pair_uses_more_header_replicas():
     """DR8/DR10 are CR 1/3 with 3 replicas, DR9/DR11 CR 2/3 with 2 -- the
-    robust rate spends more airtime on the header as well as the code."""
+    robust rate spends more airtime on the header as well as the code.
+    """
     for slow, fast in ((8, 9), (10, 11)):
         a, b = cfg.datarate(slow), cfg.datarate(fast)
         assert a['bw_khz'] == b['bw_khz']
@@ -94,7 +91,7 @@ def _round_trip(dr, region='EU868'):
     buf += (RNG.standard_normal(len(buf)) +
             1j*RNG.standard_normal(len(buf)))*1e-3
     with contextlib.redirect_stdout(io.StringIO()):
-        res = lrfhss.decode(buf, lrfhss.DecodeOptions(sensitive_retry=False))
+        res = lrfhss.decode(buf, lrfhss.DecodeOptions())
     return res
 
 
@@ -107,7 +104,8 @@ def test_round_trip_at_each_eu868_datarate(dr):
 @pytest.mark.parametrize('dr', [8, 9, 10, 11])
 def test_decoded_header_reports_the_datarate_coding_rate(dr):
     """CR is carried in the header, so a DR-encoded packet should come
-    back announcing that DR's coding rate."""
+    back announcing that DR's coding rate.
+    """
     res = _round_trip(dr)
     hdr = next(r['header'] for r in res if r['crc'])
     assert hdr['CR'] == cfg.datarate(dr)['cr']
@@ -115,7 +113,8 @@ def test_decoded_header_reports_the_datarate_coding_rate(dr):
 
 def test_explicit_parameters_still_override_a_datarate():
     """Most of the LR-FHSS parameter space has no DR name, so the direct
-    arguments have to keep working -- and win when both are given."""
+    arguments have to keep working -- and win when both are given.
+    """
     cfg.retune(722_660, hdr_count=4)
     _, meta = lrfhss.encode(b'x', dr=8, bw_khz=722.66, header_count=4, CR=0)
     assert meta['bw_khz'] == 722.66

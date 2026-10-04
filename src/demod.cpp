@@ -1,33 +1,7 @@
-// Part of the lrfhss_viterbi_ext pybind11 extension.
-// Split out of the former single-file viterbi_ext.cpp; the code below is
-// unchanged apart from the includes and linkage needed to compile
-// separately. See module.cpp for the module-level documentation.
+// Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+// SPDX-License-Identifier: MIT
 #include "demod.hpp"
 
-// ---------------------------------------------------------------------
-// demod_symbols: full port of lrfhss_demod.py's demod_symbols. Folds the
-// per-symbol phase-slope measurement, wrap rule, percentile-based drift
-// threshold, two-pass drift estimate, and final clip into one C++ call.
-// Was 11617 calls/run in profiling, 2.58s total with 0.92s of that pure
-// np.percentile overhead (full sort dispatch via numpy's Python-level
-// quantile machinery) plus per-call numpy op dispatch for angle/where/
-// sign/mean/sum on small arrays -- none of it a true sequential
-// dependency, but chaining ~10 numpy calls per invocation at this call
-// count adds up. Matches numpy's percentile(..., 80) EXACTLY: same
-// linear-interpolation formula (idx=(n-1)*p/100, interp between
-// sorted[floor(idx)] and sorted[ceil(idx)]), validated against the numpy
-// reference (see ext/test_viterbi_ext.py).
-//
-// sig: complex128 array passed DIRECTLY (no re/im split). Passing the
-// complex array as-is avoids the two np.ascontiguousarray copies the
-// split version forced -- .real/.imag of a complex128 array are strided
-// views, so handing them to C++ required materializing two contiguous
-// float64 arrays on EVERY call. At this function's real call volume
-// (343,966 calls on a -10dB 122-cluster run) that copy tax measured
-// 698,836 ascontiguousarray calls / 6.66s -- the single largest cost in
-// the whole pipeline, larger than sosfilt or the Viterbi. std::complex
-// is layout-compatible with numpy complex128, so this binding reads the
-// caller's buffer in place with no copy at all.
 py::array_t<double> demod_symbols_ext(
     py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> sig,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> smpltime,
@@ -60,17 +34,6 @@ py::array_t<double> demod_symbols_ext(
         bits[i] = k / phaseslope;
     }
 
-    // percentile(|bits|, 80), numpy 'linear' method, bit-exact formula.
-    // Was a full std::sort (O(n log n)) just to read off two order
-    // statistics (ranks ilo, ihi). std::nth_element is O(n) average --
-    // the competitive-programming substitution for "I need the k-th
-    // smallest element" when the full sorted order isn't needed. Two
-    // nth_element calls (ilo, then ihi restricted to the remaining
-    // partition v[ilo+1:]) still total O(n), strictly less work than one
-    // O(n log n) sort. Validated bit-exact against the sort-based version
-    // over 2000 randomized trials (max diff 0); measured 2.18x-3.85x at
-    // n=40..500 (the growing gap matches the O(n log n) vs O(n) theory --
-    // benefit increases with n, as expected).
     std::vector<double> absbits(n);
     for (int i = 0; i < n; ++i) absbits[i] = std::fabs(bits[i]);
     double thr = 0.0;
@@ -123,27 +86,6 @@ py::array_t<double> demod_symbols_ext(
     return out;
 }
 
-// ---------------------------------------------------------------------
-// demod_symbols_grid: batch demod_symbols over a whole gsto (symbol-timing
-// offset) sweep in ONE call, instead of one pybind11 call per gsto.
-//
-// try_thishdridx's payload search runs
-//     for dcfo: for gsto in range(0, SMBL, 3): for each fragment: demod
-// which measured 343,966 demod_symbols_ext calls / 3.455s on a -10dB run
-// -- at ~50 sample centers per call, that is dominated by per-call
-// dispatch + array allocation, not by the phase-slope arithmetic. This
-// hoists the gsto loop into C++ so the whole 114-value sweep for one
-// (fragment, dcfo) pair costs a single crossing.
-//
-// Math per gsto row is IDENTICAL to demod_symbols_ext (same centers rule
-// gsto + lookdist + i*smbl, same wrap rule, same percentile-80 drift
-// threshold and two-pass adjust, same clip), so output is bit-for-bit the
-// same as looping the scalar version -- validated against it directly.
-//
-// Returns [n_gsto, nbits] soft values. A row whose centers don't fit in
-// the signal is returned as all-zeros and flagged 0 in `valid`, matching
-// the Python caller's own "parts.append(np.zeros(nbits))" fallback.
-// ---------------------------------------------------------------------
 py::tuple demod_symbols_grid(
     py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> sig,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> gstos,
@@ -155,8 +97,6 @@ py::tuple demod_symbols_grid(
 
     py::array_t<double> out({n_gsto, nbits});
     py::array_t<int> valid(n_gsto);
-    // Raw pointers taken under the GIL; compute below runs with it
-    // released so worker threads parallelize (see viterbi_payload_full).
     const std::complex<double>* sg_p = sig.data();
     const int64_t* gs_p = gstos.data();
     double* o_p = out.mutable_data();
@@ -210,12 +150,6 @@ py::tuple demod_symbols_grid(
             bits[i] = val;
         }
 
-        // percentile(|bits|, 80), numpy 'linear' method (same fix as
-        // demod_symbols_ext: nth_element instead of full sort -- see that
-        // site's comment for validation/benchmark detail). This call site
-        // runs inside the gsto sweep (up to 114x per fragment per
-        // hypothesis), higher volume than the header path, so the O(n) vs
-        // O(n log n) gap matters more here.
         for (int i = 0; i < m; ++i) absbits[i] = std::fabs(bits[i]);
         sorted_abs.assign(absbits.begin(), absbits.begin() + m);
         double idx = (m - 1) * 80.0 / 100.0;

@@ -1,14 +1,6 @@
-# Part of the lrfhss receiver package.
-"""FFT entry points for the receiver.
-
-Plain scipy.fft, single-threaded.
-
-An OpenCL GPU backend lived here for a while. It worked and was
-numerically exact, but it was worth only ~11% of a decode -- the FFTs are
-~16% of the work, the rest being sequential C++ Viterbi and IIR filtering
-that a GPU does not help -- and it aborted the interpreter when several
-captures were decoded on threads. Not worth the complexity.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""FFT entry points for the receiver."""
 import scipy.fft as _sfft
 
 

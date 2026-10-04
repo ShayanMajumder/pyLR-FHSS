@@ -1,42 +1,5 @@
-// viterbi_ext.cpp -- pybind11 C++ cores for the two hot sequential Viterbi
-// loops in lrfhss_decode.py / lrfhss_header.py.
-//
-// These replace ONLY the per-symbol "for i in range(n): argmin(...)"
-// Python loops. All trellis-shape tables (sorted-branch predecessor lists,
-// output-symbol bit patterns, CRC LUTs) are computed once in Python (as the
-// existing modules already do) and passed in as plain numpy arrays, so
-// there is no duplicated/hand-transcribed trellis data here -- if the
-// Python trellis constants ever change, these functions pick it up
-// automatically with no C++ edits. This keeps the C++ side bit-exact by
-// construction rather than by manual sync.
-//
-// Two entry points:
-//   viterbi_payload(cost_sym, sort_from, sort_inp, sort_osy)
-//       64-state rate-1/3 payload trellis, cost[0]=0 start, best-end trace.
-//   viterbi_header(cost_sym, sort_from, sort_inp, sort_osy)
-//       16-state rate-1/2 header trellis, ONE start state (the Python side
-//       loops this 16x over start states -- see viterbi_header_multistart
-//       below which does all 16 in one C++ call to cut per-call Python/pybind
-//       overhead 16x).
-//   viterbi_header_multistart(cost_sym, sort_from, sort_inp, sort_osy)
-//       runs all 16 start states, returns the winning info-bit array for
-//       each (caller still does the CRC8 check + early-exit in Python, but
-//       the expensive DP inner loop -- the actual hot path -- is now C++
-//       for every state).
-//   viterbi_header_backward(cost_sym, rsort_from, rsort_inp, rsort_osy)
-//       mirrors _decode_header_backward: all 16 END states, predecessor
-//       (reverse) trellis, forward-in-i but backward-in-trellis-direction
-//       DP exactly as the Python version does it.
-//
-// All cost math, branch selection (np.argmin over axis=1, ties broken by
-// first-index like numpy), and traceback exactly mirror the numpy
-// reference implementations bit-for-bit (verified against them before
-// swapping call sites).
-
-// NOTE: this file now holds only the pybind11 module definition. The
-// implementations live beside it, grouped by role: crc.cpp, viterbi_dp.cpp,
-// viterbi.cpp, demod.cpp, deinterleave.cpp, filters.cpp.
-
+// Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+// SPDX-License-Identifier: MIT
 #include "common.hpp"
 #include "crc.hpp"
 #include "viterbi.hpp"

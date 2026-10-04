@@ -9,7 +9,7 @@ shaping, actual carrier offset and actual noise.
 | sketch | radio | status |
 |---|---|---|
 | `sx1262_beacon/` | SX1262 | decodes end to end; the bundled recording came from it |
-| `lr1120_beacon/` | LR1120 | decodes end to end |
+| `lr1120_beacon/` | LR1120 | LoRaWAN DR8 at 869.525 MHz, +22 dBm |
 
 It beacons one packet every `BEACON_PERIOD_MS`, forever. No handshake, no
 serial protocol: flash it and it transmits.
@@ -116,9 +116,50 @@ which is the reason this project exists.
 
 # lr1120_beacon
 
-The same beacon on an LR1120. Everything except the radio is identical to
-`sx1262_beacon`, which is the point: decode both and the only variable is
-the transmitter.
+An LR1120 sending a LoRaWAN **DR8** `Hello World` packet every 5 s at full
+power, on an LR1120 mbed shield seated on a Nucleo-L476RG (any Nucleo-64
+with Arduino headers works).
+
+| setting | value | note |
+|---|---|---|
+| `LRFHSS_BW` | 136.72 kHz | DR8 |
+| `LRFHSS_CR` | 1/3 | DR8 |
+| `LRFHSS_HDRS` | 3 | DR8 |
+| `NARROW_GRID` | true | 3.9 kHz grid, DR8 |
+| `TEST_FREQ` | 869.525 MHz | see below |
+| `TEST_POWER` | 22 dBm | the LR1120's maximum; above 14 dBm RadioLib uses the high-power PA |
+| `BEACON_PERIOD_MS` | 5000 | `Hello World`, ~1.4 s on air |
+
+**Why 869.525 MHz.** In the EU and UK, full power is only allowed in the
+869.4-869.65 MHz sub-band: 500 mW ERP at up to 10% duty cycle. DR8's
+137 kHz channel fits inside it. The usual DR8 channels (868.1/868.3/868.5
+MHz) are limited to 25 mW (14 dBm) and 1%, and 915 MHz is not an ISM band
+there at all.
+
+**Duty cycle.** A 1.4 s `Hello World` every 5 s is ~28%, well over that
+10%: fine into a dummy load or through attenuators into an SDR, not on an
+antenna. `BEACON_PERIOD_MS` of 15000 or more brings it under.
+
+**Into an SDR by cable:** +22 dBm will damage it. An Airspy takes +10 dBm
+at most, so put at least 40 dB of attenuation in line.
+
+Build and flash:
+
+```bash
+arduino-cli compile -b STMicroelectronics:stm32:Nucleo_64:pnum=NUCLEO_L476RG \
+                    --output-dir /tmp/build lr1120_beacon
+st-flash --reset write /tmp/build/lr1120_beacon.ino.bin 0x08000000
+```
+
+The snap build of `arduino-cli` cannot read `~/.arduino15`, where the IDE
+installs the STM32 core, and fails with "permission denied"; use the IDE,
+or Arduino's standalone `arduino-cli` binary.
+
+Receive it with `../live_receive.py`, which is set up for it, or in code:
+
+```python
+lrfhss.config.retune_dr(8, sync_word='12AD101B')
+```
 
 ## Wiring
 
@@ -130,7 +171,7 @@ this bench: NSS `D7`, IRQ/DIO9 `D5`, RESET `A0`, BUSY `D3`. A `-2` from
 
 Note the difference from the SX1262 photo above: this board brings out
 **three** SMA ports, for sub-GHz, 2.4 GHz and a GNSS active antenna. The
-antenna has to be on the sub-GHz one for the 915 MHz this sketch uses.
+antenna has to be on the sub-GHz one for the 869.525 MHz this sketch uses.
 On the wrong port the chip still reports a successful transmit, because
 nothing downstream of the RF switch is measured -- the same class of
 silent failure as the sync word below.
@@ -151,7 +192,8 @@ Two LR1120-specific things the SX1262 does not need:
 
 ## Measured behaviour
 
-Flashed and confirmed on a Nucleo-L476RG: `beginLRFHSS` and
+With the earlier 39.06 kHz settings at 915 MHz and 10 dBm, flashed and
+confirmed on a Nucleo-L476RG: `beginLRFHSS` and
 `setLrFhssConfig` both return 0, every `transmit()` returns 0, and an
 RTL-SDR at 915 MHz sees **bursts of 1.44 s exactly 4.00 s apart**. That
 length is right: 3 header replicas of 233.472 ms plus 7 payload fragments

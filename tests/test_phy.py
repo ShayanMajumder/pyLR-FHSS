@@ -1,12 +1,9 @@
-"""Protocol primitives: CRCs, hop sequence, fragment arithmetic.
-
-These are the pieces both directions share, so a bug here shows up as a
-mysterious decode failure rather than an obvious one.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""Protocol primitives: CRCs, hop sequence, fragment arithmetic."""
 import numpy as np
 import pytest
 
-import lrfhss
 from lrfhss.encoder import payload_fragments
 from lrfhss.phy import fec, framing, hopping
 
@@ -49,10 +46,9 @@ def test_hop_sequence_validity_matches_the_grid_tables(grid, bw_bits, expect_ok)
 
 
 def test_hop_grid_size_is_floored_not_fractional():
-    """1480 channels / 52 per FCC slot is 28.46, and the LFSR tables key
-    off the integer 28. Leaving it fractional matched no branch, so the
-    generator returned None for every FCC config except the two that
-    happen to divide exactly -- which silently disabled decoding."""
+    """1480 channels / 52 per FCC slot is 28.46, and the LFSR tables key off
+    the integer 28.
+    """
     for bw_bits, expect in (([0, 1, 1, 0], 28), ([0, 1, 1, 1], 30),
                             ([1, 0, 0, 0], 60), ([1, 0, 0, 1], 62)):
         _, n_grid, *_ = hopping._get_hop_params(0, bw_bits, [0]*9)
@@ -89,13 +85,7 @@ def test_longer_payloads_never_need_fewer_fragments():
 def test_fec_chain_decodes_error_free_bits_at_every_length(cr, vext, monkeypatch):
     """The encoder's coded bits straight into the decoder's deinterleaver
     and Viterbi, no waveform in between.
-
-    CR=0 used to fail here on 4 payload lengths in 5 with no bit errors at
-    all: the de-puncturer padded the last 15-bit puncturing period out in
-    full, and the extra trellis steps moved where the CRC is read. Lengths
-    with n % 5 == 1, such as 'hello world', happen to fill the period,
-    which is why it passed for them and looked like an encoder bug that
-    depended on payload content."""
+    """
     from lrfhss import encoder
     monkeypatch.setattr(fec, '_HAVE_VEXT', fec._HAVE_VEXT and vext)
     rng = np.random.default_rng(cr)

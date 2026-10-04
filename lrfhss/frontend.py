@@ -1,6 +1,6 @@
-# Part of the lrfhss receiver package.
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
 
-import os
 import threading
 import numpy as np
 import scipy.signal as sp
@@ -21,13 +21,6 @@ def _channel_mask(M):
 
 def load_frontend(fn, NB=cfg._NB, OV=cfg._OV):
     if str(fn).lower().endswith('.wav'):
-        # Streaming path: parse the header (cheap), then let the inner
-        # loop below pull NB-sized chunks straight off disk as it goes,
-        # instead of reading+allocating the whole capture (150MB+) up
-        # front via scipy.io.wavfile.read(). Peak memory drops from
-        # O(whole capture) to O(one FFT block, ~17.7MB on this receiver's
-        # NB/OV settings); processing of the first block can start after
-        # reading ~17.7MB instead of waiting on the full file read.
         raw = _WavChunkReader(fn)
     else:
         raw = np.memmap(fn, dtype=np.float32, mode='r')
@@ -37,14 +30,6 @@ def load_frontend(fn, NB=cfg._NB, OV=cfg._OV):
     src = (k0 + np.r_[0:M//2, -(M//2):0]) % NB
     mask = _channel_mask(M)
     hop = NB-OV; dOV = OV//cfg.DECIM
-    # Chunk positions first, so the per-chunk work can be threaded. The
-    # FFT/IFFT dominates each chunk (~60ms vs ~20ms for the read) and
-    # scipy.fft releases the GIL, as does deinterleave_iq_ext, so these
-    # overlap on a multi-core box. The raw read is guarded by a lock:
-    # _WavChunkReader shares one file handle and does explicit seek+read,
-    # which is NOT thread-safe -- concurrent seeks would interleave and
-    # hand back wrong bytes. Serializing just the read (not the compute)
-    # keeps that correct while still overlapping the expensive part.
     chunk_pos = []
     pos = -OV
     while pos < N2:
@@ -77,22 +62,6 @@ def load_frontend_windowed(fn, NB=cfg._NB, OV=cfg._OV, queue_maxsize=2):
     """Generator version of load_frontend for .wav inputs: reads and
     decimates in windows with true read-ahead, instead of concatenating
     the whole capture into one array.
-
-    Read pattern, exactly as specified: read window N (via file
-    positioning -- seek + read on a persistent handle, not reopen-per-call)
-    -> hand it off for FFT-decimate processing -> WHILE that processing
-    runs, the reader thread is already seeking + reading window N+1 off
-    disk. One background I/O-only thread (_WavChunkReader.read_window,
-    pure disk read, no FFT) feeds a small bounded queue; this generator
-    (the consumer, running in the caller's thread) pulls raw windows and
-    does the FFT-domain decimation math itself. This is genuine I/O and
-    compute overlap -- the previous version did read+FFT together inside a
-    single producer thread, which queued chunks but never let disk read
-    and FFT compute happen concurrently for adjacent windows.
-
-    queue_maxsize bounds how far the reader can get ahead of the
-    consumer's FFT processing (default 2: the window currently being
-    consumed plus one prefetched window, not unbounded read-ahead).
     """
     import threading, queue
     if not str(fn).lower().endswith('.wav'):
@@ -112,11 +81,10 @@ def load_frontend_windowed(fn, NB=cfg._NB, OV=cfg._OV, queue_maxsize=2):
     exc_holder = []
 
     def reader():
-        """I/O-only thread: seeks + reads each window's raw interleaved
-        float32 samples via file positioning and pushes (pos, lo, hi, raw)
-        onto the queue. No FFT/decimate math here -- that stays in the
-        consumer below, so this thread is purely doing the next disk read
-        while the consumer is busy with the current window's compute."""
+        """I/O-only thread: seeks + reads each window's raw interleaved float32
+        samples via file positioning and pushes (pos, lo, hi, raw) onto the
+        queue.
+        """
         try:
             pos = -OV
             while pos < N2:
@@ -139,9 +107,6 @@ def load_frontend_windowed(fn, NB=cfg._NB, OV=cfg._OV, queue_maxsize=2):
             if item is SENTINEL:
                 break
             pos, lo, hi, a = item
-            # FFT-decimate compute happens HERE, in the consumer, while the
-            # reader thread is already seeking/reading the next window off
-            # disk in parallel.
             if cfg._HAVE_VEXT_LOCAL:
                 seg = np.asarray(cfg._vext_local.deinterleave_iq_ext(
                     np.ascontiguousarray(a, dtype=np.float32), NB, lo-pos))

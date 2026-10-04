@@ -1,22 +1,13 @@
-# Part of the lrfhss receiver package.
-"""Console output for a decode run.
-
-Every print the pipeline emits lives here, so the decode logic reads as
-decisions rather than as formatting, and so the output can be silenced or
-redirected in one place instead of thirty.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""Console output for a decode run."""
 import numpy as np
 
 from . import config as cfg
 
 
 def accel_banner():
-    """State plainly whether the C++ extension is in play.
-
-    Every C++ path in this receiver falls back to numpy SILENTLY when the
-    extension isn't built, so a run with no .so present looks identical --
-    just several times slower. Make that visible.
-    """
+    """State plainly whether the C++ extension is in play."""
     if cfg._HAVE_VEXT_LOCAL:
         print('  [accel] C++ extension active (lrfhss._viterbi_ext)')
     else:
@@ -62,10 +53,6 @@ def ghost(pwr_snr):
 
 
 def snr(pwr_snr):
-    # check_energy_length can hand back 0 or a negative ratio when the
-    # window it measured holds no packet -- which happens whenever the
-    # caller's parameters are wrong, exactly when you are reading this
-    # output. log10 of that is a RuntimeWarning and a nan in the trace.
     if not pwr_snr > 0:
         print('  Estimated packet SNR: n/a (no energy in the measured window)')
     else:
@@ -98,11 +85,6 @@ def config_mismatch():
 
 def plot_written(path):
     print('  [plot] wrote %s (payload-confirmed real packet)' % path)
-
-
-def sensitive_rescan(old_thresh):
-    print('\n==== no packets at MF_THRESH=%.2f -- rescanning at sensitive '
-          'threshold %.2f (low-SNR tier) ====' % (old_thresh, cfg.MF_THRESH_SENSITIVE))
 
 
 def summary(results, n_sync, n_clusters):

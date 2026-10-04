@@ -1,4 +1,5 @@
-# Part of the lrfhss receiver package.
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
 
 from . import config as cfg
 from .payload import _packet_slots
@@ -6,14 +7,8 @@ from .payload import _packet_slots
 
 def plot_packet_spectrogram(iq, hdr, hwin, hfp, out_path, margin_sec=0.15):
     """Save a spectrogram of one packet with header/payload slots boxed and
-    labeled. Uses matplotlib's specgram on a window covering the packet plus
-    a small margin, then draws a rectangle + label over each header replica
-    and payload fragment using the exact slot layout the receiver decoded.
-
-    matplotlib is imported here rather than at module scope: it costs ~320 ms
-    to import, this module is reached from the pipeline whether or not
-    plotting was asked for, and decode_sweep pays that per capture. Nothing
-    below runs unless a caller actually wants a plot."""
+    labeled.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -38,22 +33,15 @@ def plot_packet_spectrogram(iq, hdr, hwin, hfp, out_path, margin_sec=0.15):
     ax.set_ylabel('Frequency (Hz)', fontsize=24)
     ax.tick_params(labelsize=20)
 
-    box_h = 2000  # half-height of the drawn box around each slot's freq, Hz
+    box_h = 2000
     for s in slots:
         rel_t0 = (s['t_start']-t_lo)/cfg.FS
         rel_t1 = (s['t_end']-t_lo)/cfg.FS
         is_header = s['label'].startswith('header')
-        # Header replicas and payload fragments are the two things worth
-        # telling apart at a glance, so they get a colour each -- and the
-        # label carries it, because at this font size a label can sit well
-        # clear of its box.
         color = 'red' if is_header else 'cyan'
         ax.add_patch(matplotlib.patches.Rectangle(
             (rel_t0, s['freq']-box_h), rel_t1-rel_t0, 2*box_h,
             fill=False, edgecolor=color, linewidth=2.0))
-        # Headers label above, payload below. Fragments hop upwards and sit
-        # only a dwell apart, so at this font size a label above one box
-        # lands on top of the next; below them nothing competes.
         ax.text(rel_t0, s['freq'] + (box_h+500 if is_header else -box_h-500),
                 s['label'], color='red' if is_header else 'orange',
                 fontsize=17, fontweight='bold',

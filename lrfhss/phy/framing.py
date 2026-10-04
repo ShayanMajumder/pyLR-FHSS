@@ -1,4 +1,9 @@
-"""Header decode primitives (ported from lrfh_deinterleaving_hdr / decode_hdr / crc8)."""
+# Implemented with reference to the LR-FHSS-receiver MATLAB code by Jumana
+# Bukhari and Zhenghao Zhang, https://github.com/jumanamirza/LR-FHSS-receiver
+# That code is provided for education and academic research only.
+"""Header decode primitives: deinterleaving, tail-biting Viterbi decoding
+and CRC-8.
+"""
 import numpy as np
 from .fec import MY_TRELLIS_HEADER, _int_to_bits, _HAVE_VEXT, _vext
 
@@ -11,15 +16,7 @@ _BIT8_WEIGHTS = np.array([128, 64, 32, 16, 8, 4, 2, 1], dtype=np.int64)
 
 
 def crc8_header(bits32):
-    """CRC8 over 32 header info bits.
-
-    C++ path (crc8_ext) when available: was pure Python doing a 4-round
-    LUT walk with a fresh _int_to_bits() numpy array allocation per round.
-    Profiled at 64037 calls / 0.641s on a -10dB run (this runs once per
-    Viterbi start-state per (df, cfo) grid combo), with _int_to_bits
-    itself showing 256148 calls / 0.436s separately. Validated bit-exact
-    over 3000 randomized trials (0 fails); measured 22.51x.
-    """
+    """CRC8 over 32 header info bits."""
     if _HAVE_VEXT:
         d = np.asarray(bits32, int).ravel()
         return np.asarray(_vext.crc8_ext(d.astype(np.int32)))
@@ -33,9 +30,10 @@ def crc8_header(bits32):
 
 
 def deinterleave_header(header_bits):
-    """header_bits: 113 bits (hard or soft). temp = [bits[1:41], bits[73:]] (0-based)."""
+    """header_bits: 113 bits (hard or soft). temp = [bits[1:41], bits[73:]] (0-based).
+    """
     h = np.asarray(header_bits)
-    temp = np.concatenate([h[1:41], h[73:]])   # MATLAB header(2:41), header(74:end)
+    temp = np.concatenate([h[1:41], h[73:]])   # the coded bits around the sync word
     deint = np.zeros(80, dtype=h.dtype)
     for idx in range(80):
         deint[idx] = temp[_HDR_DEINT[idx]-1]
@@ -47,32 +45,18 @@ def _cal_dist_soft(bits, r):
     return np.sum(np.where(b == 1, 255-r, r))
 
 
-
-# --- Precomputed flat branch tables for fast Viterbi (bit-exact w/ original) ---
 _BR_FROM = np.repeat(np.arange(16), 2)
 _BR_INP  = np.tile([0, 1], 16)
 _BR_NXT  = np.array([[MY_TRELLIS_HEADER['nextStates'][s, i] for i in range(2)] for s in range(16)]).reshape(-1)
 _BR_OSY  = np.array([[MY_TRELLIS_HEADER['outputs'][s, i] for i in range(2)] for s in range(16)]).reshape(-1)
 _OUT2_TAB = np.array([_int_to_bits(v, 2) for v in range(4)])
 
-# Destination-sorted view for vectorized branch reduction (same fix as the
-# payload Viterbi in lrfhss_decode_fast.py: replaces a 32-iteration Python
-# loop with one [16,2] argmin, bit-exact, ~5x faster on this stage).
 _BR_SORT = np.argsort(_BR_NXT, kind='stable')
 _BR_SORT_FROM = _BR_FROM[_BR_SORT].reshape(16, 2)
 _BR_SORT_INP  = _BR_INP[_BR_SORT].reshape(16, 2)
 _BR_SORT_OSY  = _BR_OSY[_BR_SORT].reshape(16, 2)
 _ARANGE16 = np.arange(16)
 
-# --- Backward (reverse-direction) trellis for bidirectional (SOVA-style)
-# Viterbi. Forward-only search concentrates decode errors at the front of
-# the frame (matches the pattern Jung et al. report and fix with forward+
-# backward search); a pure backward pass recovers different failure cases,
-# not a superset of forward's. Validated on 300 synthetic header trials at
-# noise near the forward decoder's own failure threshold: forward alone
-# 46/300, forward+backward 83/300 (+80%). This is 2x the Viterbi cost of a
-# single pass, not the 11x Jung et al. spend on Doppler-candidate search
-# (which this receiver doesn't attempt -- flat time-complexity constraint).
 _REV_PRED_FROM = [[] for _ in range(16)]   # predecessor state per successor
 _REV_PRED_INP = [[] for _ in range(16)]
 _REV_PRED_OSYM = [[] for _ in range(16)]
@@ -96,7 +80,8 @@ _RBR_SORT_OSY  = _RBR_OSY.reshape(16, 2)
 def _decode_header_backward(deint_soft):
     """Backward Viterbi: same trellis run in reverse (predecessor lookup),
     trying all 16 possible END states (mirrors forward's 16 START states,
-    since the true end state is equally unknown at receive time)."""
+    since the true end state is equally unknown at receive time).
+    """
     q = np.round(127*np.asarray(deint_soft, float)) + 128
     q = np.clip(q, 0, 255)
     n = len(q)//2
@@ -105,11 +90,6 @@ def _decode_header_backward(deint_soft):
     cost_sym = np.stack([np.sum(np.where(_OUT2_TAB[v] == 1, 255 - r, r), axis=1)
                          for v in range(4)], axis=1)
 
-    # Same "run every end-state's DP, take first CRC8 pass" logic as before,
-    # just with the inner sequential DP (the actual hot loop -- 16 states x
-    # n steps x Python/numpy dispatch per step) moved to a single pybind11
-    # call that runs all 16 end-states as tight C++ loops. Bit-exact with
-    # the per-state numpy loop below (validated in ext/test_viterbi_ext.py).
     if _HAVE_VEXT and n > 0:
         rows = _vext.viterbi_header_backward(cost_sym, _RBR_SORT_FROM, _RBR_SORT_INP, _RBR_SORT_OSY)
         for end_state in range(16):
@@ -143,29 +123,7 @@ def _decode_header_backward(deint_soft):
 
 
 def decode_header(deint_soft, try_backward=False, metric='manhattan'):
-    """16-state rate-1/2 Viterbi over 80 soft bits -> 40 info bits + CRC8.
-    Vectorized branch-metric version, bit-exact with the original per-state
-    loops but ~8x faster (this Viterbi was the pipeline's real hotspot).
-    Forward-only by default. Pass try_backward=True to also attempt the
-    backward (SOVA-style) pass if forward fails -- kept opt-in because
-    running both at every (df, cfo) combo in the caller's outer grid search
-    doubles the false-positive surface there (33 combos x 32 total start/end
-    states instead of 16); the caller should sweep the grid forward-only
-    first, and only re-sweep with try_backward=True if nothing was found,
-    so backward adds recovery without inflating false positives across the
-    whole grid.
-
-    metric: 'manhattan' (default, absolute-value soft-decision distance) or
-    'euclid' (squared-distance). Manhattan is the standard soft-Viterbi
-    proxy for ML with quantized soft bits and is what this decoder always
-    used. Tested squared-Euclidean against real -10dB ground truth on the
-    real capture: it is NOT strictly better -- it recovered a DIFFERENT
-    true packet than Manhattan did (t=1.761 vs t=5.762), missing the one
-    Manhattan finds. Neither metric dominates; they have different error
-    statistics on the same noise. Kept as an explicit opt-in for exactly
-    this reason -- decode_header_at's low-SNR fallback tries both and
-    takes the union, rather than this function silently picking one.
-    """
+    """16-state rate-1/2 Viterbi over 80 soft bits -> 40 info bits + CRC8."""
     q = np.round(127*np.asarray(deint_soft, float)) + 128
     q = np.clip(q, 0, 255)
     n = len(q)//2
@@ -179,21 +137,6 @@ def decode_header(deint_soft, try_backward=False, metric='manhattan'):
                              for v in range(4)], axis=1)
     best_result = None
 
-    # Same 16-start-state, first-CRC8-pass-wins logic as before. The
-    # sequential DP inner loop (16 states x n steps, called at every (df,
-    # cfo) combo in the caller's outer acquisition grid search -- this is
-    # the hottest header-side loop in the whole receiver) now runs as one
-    # pybind11 call doing all 16 states as tight C++ loops instead of 16
-    # separate Python-level numpy-dispatch loops. Bit-exact with the numpy
-    # fallback below (validated in ext/test_viterbi_ext.py).
-    #
-    # Note: the C++ fast path (_HAVE_VEXT) always uses the Manhattan
-    # metric internally regardless of `metric` -- the Euclidean branch
-    # metric is only computed in the numpy `cost_sym` above and consumed by
-    # the numpy fallback loop. When metric='euclid', route to the numpy
-    # path explicitly so the requested metric is actually honored, at the
-    # cost of losing the C++ speedup for that call (acceptable: euclid is
-    # opt-in, used only in the -10dB fallback tier, not the default path).
     if _HAVE_VEXT and n > 0 and metric != 'euclid':
         rows = _vext.viterbi_header_multistart(cost_sym, _BR_SORT_FROM, _BR_SORT_INP, _BR_SORT_OSY)
         for start_state in range(16):

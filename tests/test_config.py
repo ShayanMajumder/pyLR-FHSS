@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
 """config.retune(): the derived front end, and the traps around it."""
 import numpy as np
 import pytest
@@ -22,7 +24,8 @@ def test_decimation_is_the_largest_that_still_passes_the_signal(bw_hz, decim, fs
 
 def test_every_derived_value_moves_with_the_bandwidth():
     """retune() exists so these cannot be set piecemeal and go
-    inconsistent -- which is how several decode bugs started."""
+    inconsistent -- which is how several decode bugs started.
+    """
     cfg.retune(722_660)
     assert cfg.SMBL == round(cfg.FS/cfg.BW)
     assert cfg.LOOKDIST == round(cfg.SMBL/4)
@@ -42,7 +45,8 @@ def test_hop_window_covers_the_band_but_stays_inside_nyquist():
 
 def test_hop_window_has_margin_beyond_the_outermost_hop():
     """A snug 1.01x left ~2 kHz at the edge and the outermost hops fell
-    off it, so bw=39.06 kHz decoded nothing."""
+    off it, so bw=39.06 kHz decoded nothing.
+    """
     cfg.retune(39_060)
     assert cfg.ALLBW/2 - 39_060/2 > 2_000
 
@@ -76,7 +80,8 @@ def test_retired_cores_keyword_is_accepted_and_ignored():
 
 def test_payload_budget_scales_with_the_work_per_hypothesis():
     """Every hypothesis in the payload search costs ~FS, so a budget
-    tuned at DECIM=18 starves DECIM=1 and truncates a real search."""
+    tuned at DECIM=18 starves DECIM=1 and truncates a real search.
+    """
     cfg.retune(39_060)
     narrow = cfg.PAYLOAD_TIME_BUDGET_S
     cfg.retune(1_574_200)
@@ -85,7 +90,8 @@ def test_payload_budget_scales_with_the_work_per_hypothesis():
 
 def test_setting_parameters_on_the_package_does_not_affect_decoding():
     """Modules read config.FS at call time; lrfhss.FS = ... binds a name
-    nothing looks at. Worth pinning so the README stays true."""
+    nothing looks at. Worth pinning so the README stays true.
+    """
     cfg.retune(136_720)
     lrfhss.FS = 12345
     assert cfg.FS != 12345

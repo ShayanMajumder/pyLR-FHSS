@@ -1,9 +1,7 @@
-"""hop_freq.py -- port of calculate_freq_from_hop_seq_id.m (LR-FHSS LFSR hop
-frequency generator). Given the decoded header's grid/BW/hop_seq_id/header_count,
-compute the exact PLL-step frequencies for every header replica + payload
-fragment -- the ground-truth hop schedule, rather than re-measuring each
-fragment by FFT peak (error-prone when hops are dense or noisy)."""
-import numpy as np
+# Implemented with reference to the LR-FHSS-receiver MATLAB code by Jumana
+# Bukhari and Zhenghao Zhang, https://github.com/jumanamirza/LR-FHSS-receiver
+# That code is provided for education and academic research only.
+"""LR-FHSS LFSR hop-frequency generator."""
 
 _CHANNEL_COUNT = [80, 176, 280, 376, 688, 792, 1480, 1584, 3120, 3224]
 _POLY1 = [33, 45, 48, 51, 54, 57]
@@ -17,13 +15,6 @@ def _b2d(bits):
 
 def _get_hop_params(grid, bw_bits, hop_seq_id_bits):
     channel_count = _CHANNEL_COUNT[_b2d(bw_bits)]
-    # Floor, not true division: the grid holds floor(channel_count/nb) whole
-    # slots. For the 25.39 kHz (FCC) grid most OCWs divide unevenly --
-    # 1480/52 = 28.46 -- and a float never matches the integer n_grid
-    # branches below, so _get_hop_params fell through to status=3 and
-    # calculate_freq_from_hop_seq_id returned None for every FCC config
-    # except 1523.4/1574.2 kHz (3120/52=60, 3224/52=62 divide exactly).
-    # The transmitter uses the floored count (manifest ngrid=28/30/60/62).
     n_grid = channel_count//8 if grid == 1 else channel_count//52
     hop_seq_id_de = _b2d(hop_seq_id_bits)
     xoring_seed = [0]*16
@@ -70,8 +61,7 @@ def _get_hop_params(grid, bw_bits, hop_seq_id_bits):
 
 def _next_state(lfsr, n_grid, poly, xor_seed):
     lfsr = list(lfsr)
-    for _ in range(100000):   # cap: state space is 2^16: garbage input can
-                              # cycle forever without landing hop<=n_grid
+    for _ in range(100000):
         lsb = lfsr[-1] & 1
         lfsr = [0] + lfsr[:-1]
         if lsb:
@@ -133,7 +123,8 @@ FREQ_STEP_HZ = 0.95367431640625
 
 def hop_freqs_hz(hdr, num_frags, header_count=3):
     """Convenience: hop_seq_id/grid/BW from a decoded header dict -> Hz list
-    (relative; caller anchors to a measured absolute header hop frequency)."""
+    (relative; caller anchors to a measured absolute header hop frequency).
+    """
     pll = calculate_freq_from_hop_seq_id(hdr['grid'], hdr['hop'], header_count,
                                          hdr['BW'], hdr['hopseq'], num_frags)
     if pll is None:

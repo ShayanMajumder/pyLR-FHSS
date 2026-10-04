@@ -1,34 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
 """Decode the bundled recording -- as captured, or buried in white noise.
 
     python3 examples/decode_recording.py
-
-data/capture_39kHz_hdr3.wav is a real over-the-air LR-FHSS packet: 39.06
-kHz, three header replicas, carrying "hello world". It ships already
-decimated by the front end -- 2 MB at 166.667 kHz rather than 13 MB at
-1 MSPS -- so it is read as samples and handed straight to decode().
-
-The two settings below are the ones the receiver cannot work out for
-itself. Bandwidth fixes the whole front end; header-replica count is not
-carried in the header, and a wrong value puts the payload window a dwell
-out, which decodes noise rather than failing cleanly. Grid and coding
-rate come from the decoded header, so they are not settings.
-
-SNR_DB adds white noise to see how weak the packet can get. The clean
-recording is decoded first to find the packet; its signal power is then
-measured from the recording itself -- the energy over the packet minus
-the noise floor outside it -- and just enough noise is added to reach
-SNR_DB. SNR is signal power over noise power in a 125 kHz reference
-bandwidth, the same measure as the curves in simulations/. NOISE_SEED
-picks the noise draw.
-
-Each decoded packet is saved as a spectrogram, with every header replica
-and payload fragment boxed where the receiver found it. Only packets
-whose payload decoded are plotted, so a plot is evidence rather than a
-guess. With noise added, a side-by-side of the clean and noisy capture is
-saved as well.
-
-For a different capture, edit WAV and the two settings below.
 """
 import contextlib
 import io
@@ -45,7 +20,7 @@ PLOT_DIR = os.path.join(HERE, 'plots')   # one PNG per decoded packet
 BW_KHZ = 39.06           # occupied bandwidth of this recording
 HDR_REPLICAS = 3         # header replicas it was transmitted with
 SYNC_WORD = '12AD101B'   # RadioLib's SX126x LR-FHSS sync word
-SNR_DB = None            # e.g. -22.0: add white noise down to this SNR; None = as recorded
+SNR_DB = None
 NOISE_SEED = 0           # which noise draw
 
 
@@ -60,7 +35,8 @@ def decode(capture, plot_dir=None, quiet=False):
 
 def packet_samples(hdr):
     """On-air length of a packet in samples: header replicas plus payload
-    fragments."""
+    fragments.
+    """
     cfg = lrfhss.config
     bits = 8*(hdr['payloadlen'] + 2) + 6
     n_frags = int(np.ceil(int(np.ceil(bits*[6/5, 3/2, 2, 3][hdr['CR']]))/48))
@@ -68,17 +44,7 @@ def packet_samples(hdr):
 
 
 def add_noise(capture, packet, snr_db, seed):
-    """White noise bringing `packet` (a decoded record) down to snr_db.
-
-    Noise floor: the MEDIAN power across frequency. At any instant the
-    packet occupies one narrow hop, so the median bin is noise even while
-    the packet is on -- no noise-only stretch of the recording is needed
-    (this one is barely longer than its packet). For complex white noise
-    a periodogram bin is exponential, so mean = median/ln 2.
-    Signal power: total energy minus that noise, spread over the packet's
-    on-air length. Noise added: whatever density, on top of what the
-    recording already has, puts the total at P_sig/(SNR * 125 kHz).
-    """
+    """White noise bringing `packet` (a decoded record) down to snr_db."""
     fs = lrfhss.config.FS
     n = 1024
     frames = capture[:len(capture)//n*n].reshape(-1, n)
@@ -99,7 +65,8 @@ def add_noise(capture, packet, snr_db, seed):
 
 def side_by_side(clean, noisy, packet, path):
     """The same stretch of capture clean and noisy, each panel scaled to
-    its own noise floor (the noisy one sits tens of dB higher)."""
+    its own noise floor (the noisy one sits tens of dB higher).
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -123,9 +90,6 @@ def side_by_side(clean, noisy, packet, path):
 
 
 def main():
-    # Derives the whole front end from the bandwidth: sample rate, symbol
-    # length, hop dwell times, sync matched filter, CFO ramp, hop-search
-    # window and the payload-search budget.
     lrfhss.config.retune(BW_KHZ*1e3, sync_word=SYNC_WORD, hdr_count=HDR_REPLICAS)
 
     fs, raw = wavfile.read(WAV)
@@ -147,8 +111,6 @@ def main():
 
     packets = decode(capture, plot_dir, quiet=SNR_DB is not None)
 
-    # `crc` is the accept gate; the rest are rejected candidates, returned
-    # because they are what you need when a capture will not decode.
     decoded = [p for p in packets if p['crc']]
 
     print()

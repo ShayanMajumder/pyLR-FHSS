@@ -1,69 +1,19 @@
-# Part of the lrfhss receiver package.
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
 
-import os
 import threading
 import numpy as np
 import scipy.signal as sp
 
 from . import config as cfg
-from .dsp import cached_butter, mix_and_filtfilt, notch_spurs
+from .dsp import mix_decimate_filtfilt, notch_spurs
 from .fft import _fft, _ifft
 from .frontend import load_frontend_windowed
 
 
 def _cfar_detect(ratio, guard=cfg.CFAR_GUARD, factor=cfg.CFAR_FACTOR,
-                 floor=cfg.MF_THRESH_SENSITIVE):
-    """BUILT AND TESTED, NOT USED -- kept as a documented negative result.
-    find_packets() below still uses the fixed MF_THRESH. Real reason:
-    swept CFAR_FACTOR from 1.6 to 2.5, result was FLAT (18 clean clusters,
-    10 -10dB clusters, 1/3 recall) across the whole range -- the floor
-    term was dominating everywhere, meaning the adaptive part never
-    actually engaged. Root cause: at low SNR the entire ratio array sits
-    near one degraded level (masking/self-normalization -- textbook CA-
-    CFAR failure mode when the reference window is itself
-    signal/noise-degraded, not clean background), so cell-averaging
-    compares a candidate against neighbors that are ALSO already
-    corrupted, which is worse than a single global threshold set once
-    from the whole-capture noise floor. On clean data it also fired 7
-    extra false triggers a fixed 0.62 threshold correctly rejected,
-    costing ~0.5s in extra decode_header_at grid searches for zero
-    recall gain (all absorbed by CRC8/CRC16, so still 3/3 correct, just
-    slower). CFAR is the textbook-correct approach when the reference
-    cells are genuinely independent background; this receiver's regions
-    are STFT-prescreened hot spots, which is precisely the kind of
-    correlated/non-i.i.d. neighborhood CFAR assumes away.
-
-    Cell-averaging CFAR (constant false alarm rate) detector on the MF
-    ratio statistic, replacing a single fixed global threshold.
-
-    Why: MF_THRESH was one hand-tuned number applied uniformly across the
-    whole capture. That's the textbook GLRT/matched-filter statistic
-    (normalized correlation, amplitude-independent -- see _mf_scores'
-    docstring) being compared to a threshold, which IS the
-    Neyman-Pearson-optimal detector structure; there is no
-    threshold-free alternative in the signal-detection literature --
-    every CFAR/GLRT detector (radar, SAR-GMTI, cognitive radio) is
-    "compare a statistic to a threshold," full stop. What a FIXED
-    threshold gets wrong is using one number everywhere: if background
-    correlation level drifts across the capture (different noise
-    regions, different local spurious content), a fixed cutoff either
-    misses real packets where the floor is elevated or lets through junk
-    where it's depressed. CFAR fixes this by estimating the local
-    reference level AT EACH CELL from its own neighbors (excluding a
-    guard band around the cell itself, so a real peak's own sidelobes
-    don't inflate its own reference level) and setting the threshold
-    relative to that -- same false-alarm rate everywhere, not a fixed
-    score.
-
-    `floor`: a hard minimum on top of the adaptive threshold. Pure CFAR on
-    a mostly-flat noise region can still fire on the highest of many
-    near-equal noise cells (a real, known CFAR failure mode called
-    "masking"/self-normalization when the reference window itself is
-    signal-contaminated); the floor prevents that class of false
-    detection regardless of local statistics, same purpose the old fixed
-    MF_THRESH_SENSITIVE served, just now as a backstop instead of the
-    primary gate.
-    """
+                 floor=cfg.CFAR_FLOOR):
+    """BUILT AND TESTED, NOT USED -- kept as a documented negative result."""
     n = len(ratio)
     if n == 0:
         return np.array([], dtype=int)
@@ -85,43 +35,39 @@ def _cfar_detect(ratio, guard=cfg.CFAR_GUARD, factor=cfg.CFAR_FACTOR,
     return idx[ratio > thresholds]
 
 
-PRESCREEN_NFFT = 2048
+PRESCREEN_NFFT = 2048          # at the 136.72 kHz rates' 166.7 kHz sample rate
+
+
+def prescreen_nfft():
+    """STFT size for the prescreen, scaled with the sample rate so every
+    data rate gets the same 81 Hz bins and 12.3 ms windows. A fixed 2048
+    gave 1.5 kHz bins and 0.7 ms windows at 3 MS/s (US915 DR5/6): three
+    times the hop's width of noise per bin, a third of a symbol of signal
+    per look, and most weak packets were never found."""
+    return max(PRESCREEN_NFFT, int(round(PRESCREEN_NFFT*cfg.FS/(500e3/3))))
 
 
 def mf_lpf_hz():
-    """Low-pass cutoff around a prescreen region before the sync matched
-    filter and fine sync. MF_LPF_HZ is the floor; above it, the cutoff has
-    to cover how far the region's frequency can be off -- half a prescreen
-    STFT bin plus half the rounding -- plus ~300 Hz of signal half-width.
-    The bin is FS/2048: 81 Hz at 166.7 kHz (DR8/DR9, so the floor rules
-    there), but 1465 Hz at 3 MHz (1523/1574 kHz), where a fixed 400 Hz
-    cutoff cut the signal away."""
-    err = cfg.FS/PRESCREEN_NFFT/2 + cfg.PRESCREEN_F_ROUND_HZ/2
+    """Low-pass cutoff around a prescreen region before the sync matched filter
+    and fine sync.
+    """
+    err = cfg.FS/prescreen_nfft()/2 + cfg.PRESCREEN_F_ROUND_HZ/2
     return max(cfg.MF_LPF_HZ, err + 300.0)
 
 
-def _mf_scores(tuned):
+def _mf_scores(tuned, D=1):
     """Normalized sync-word matched-filter score per candidate start, maxed
-    over CFO via FFT along the sync taps. Range [0,1], amplitude-independent
-    (unlike energy, which scales with capture gain and can't be threshold
-    reliably across different SNR regions).
-
-    NOTE on filtering: the region loop that feeds this uses sosfiltFILT
-    (zero-phase, forward+backward), not a single causal sosfilt pass, even
-    though this function only consumes |.| (magnitude). Tested swapping in
-    one-pass sosfilt (avoids the backward pass, ~1.85x fewer filter ops):
-    MEASURED WRONG -- cluster count changed 11 -> 14 with several false
-    positives and altered scores/times on the real capture. The group
-    delay from a causal filter shifts sample alignment against SYNC_OFF
-    enough to corrupt the correlation, even though the score itself is
-    magnitude-normalized. Do not "optimize" this to a single filter pass.
+    over CFO via FFT along the sync taps.
     """
+    D = max(1, int(D))
     tstep = cfg.SMBL//2
-    last = len(tuned) - cfg.SYNC_OFF[-1] - 1
+    last = len(tuned)*D - cfg.SYNC_OFF[-1] - 1
     if last <= 0:
         return np.array([], dtype=int), np.array([])
     starts = np.arange(0, last, tstep)
     idxmat = starts[:, None] + cfg.SYNC_OFF[None, :]
+    if D > 1:
+        idxmat = np.clip(np.rint((idxmat - (D - 1)/2)/D).astype(int), 0, len(tuned) - 1)
     S = tuned[idxmat]
     base = S/cfg.SYNC_VEC[None, :]
     energy = np.sqrt(np.sum(np.abs(S)**2, axis=1) + 1e-30)
@@ -130,23 +76,22 @@ def _mf_scores(tuned):
     return starts, mfbest/(energy*np.sqrt(cfg.MF_NSYNC))
 
 
+def region_decim():
+    """Decimation for the region scan: the matched filter reads one sample
+    per symbol after a ~450 Hz low-pass, so ~16 kHz (~33 samples a symbol)
+    holds everything it uses. 10 at 167 kHz, 31 at 500 kHz, 188 at 3 MHz.
+    """
+    return max(1, int(round(cfg.FS/cfg.REGION_RATE_HZ)))
+
+
 def find_packets_streaming_interleaved(fn, window_sec=1.0, hop_sec=0.5, queue_maxsize=2,
                                        on_chunk=None, on_window=None):
-    """Same reader+assembler threading as find_packets_streaming, but
-    instead of collecting all windows' hits into one list and returning
-    after the whole capture is read, calls on_window(w_start, w_buf,
-    hits, prefix_len) immediately after EACH window's find_packets()
-    finishes -- so the caller can decode+print that window's candidates
-    right away, while the assembler thread is already reading/decimating
-    the NEXT window off disk. on_chunk(chunk) is called once per raw
-    decimated+notched chunk as it becomes available, before any window
-    that needs it is scanned, so the caller can build up a growing iq
-    array in step with what's actually been read.
-
-    This is the actual interleaving requested: load window 1 -> detect ->
-    decode+print (while window 2 loads) -> detect window 2 -> decode+print
-    (while window 3 loads) -> ... rather than detect-all-windows-then-
-    decode-all-clusters as a separate second pass.
+    """Same reader+assembler threading as find_packets_streaming, but instead
+    of collecting all windows' hits into one list and returning after the
+    whole capture is read, calls on_window(w_start, w_buf, hits, prefix_len)
+    immediately after EACH window's find_packets() finishes -- so the caller
+    can decode+print that window's candidates right away, while the
+    assembler thread is already reading/decimating the NEXT window off disk.
     """
     import queue
     min_window = max((cfg.SYNC_OFF[-1]+1)/cfg.FS, cfg.STAY_HDR*0.6/cfg.FS)
@@ -215,59 +160,23 @@ def find_packets_streaming_interleaved(fn, window_sec=1.0, hop_sec=0.5, queue_ma
 def find_packets_streaming(fn, window_sec=1.0, hop_sec=0.5, queue_maxsize=2,
                            verbose=True, return_iq=False):
     """Producer/consumer streaming version of find_packets: never holds the
-    full decimated capture in memory. Reader thread streams+decimates the
-    WAV via load_frontend_windowed (true read-ahead: seeks/reads window
-    N+1 off disk while this consumer processes window N's FFT-decimate +
-    STFT scan). This consumer accumulates only a bounded trailing buffer
-    -- enough for one scan window plus the STAY_HDR*HDR_COUNT+STAY_DATA*8
-    dedup radius (pkt_len) -- and evicts everything older once no pending
-    scan window can reference it.
-
-    Carries an EWMA noise-floor estimate (find_packets' floor_state) across
-    windows so each window's STFT threshold doesn't re-estimate from
-    scratch on a small, noisy sample of frames -- this is what fixes the
-    false-positive gap a naive per-window floor produces (see
-    find_packets' docstring for the measured before/after).
-
-    Returns the same (score, t0, hf) tuple list as find_packets, with t0
-    in the same global sample-index coordinate system as if the whole
-    capture had been decimated at once.
+    full decimated capture in memory.
     """
     import queue
     min_window = max((cfg.SYNC_OFF[-1]+1)/cfg.FS, cfg.STAY_HDR*0.6/cfg.FS)
     if window_sec < min_window*1.3:
-        window_sec = min_window*1.3   # hard floor with margin, never silently
-                                        # accept a window too small to work
+        window_sec = min_window*1.3
     win_samp = int(window_sec*cfg.FS)
     hop_samp = int(hop_sec*cfg.FS)
     pkt_len = cfg.STAY_HDR*cfg.HDR_COUNT + cfg.STAY_DATA*8
     margin = int(cfg.STAY_HDR*0.6) + 8192   # span margin + filter transient pad
     keep_back = pkt_len + margin
 
-    buf = np.zeros(0, dtype=complex)
-    buf_start = 0   # global sample index of buf[0]
     all_hits = []
     floor_state = {}
     win_idx = 0
     kept = [] if return_iq else None
 
-    # Real background overlap of load vs detection, not just load vs FFT.
-    # The old version's `for chunk in load_frontend_windowed(...)` only let
-    # the reader thread read the NEXT NB-sized chunk ahead while THIS
-    # chunk's FFT-decimate ran -- but find_packets() (STFT + MF region
-    # scan, the actually expensive part) still ran synchronously in this
-    # same loop, blocking the generator from being asked for its next item
-    # until detection finished. So detection on window N and disk-read of
-    # window N+1 never overlapped -- confirmed by inspection, this was the
-    # literal gap reported.
-    #
-    # Fix: run the load_frontend_windowed loop (reader thread + FFT-decim)
-    # on its OWN background thread, which assembles scan-window-sized
-    # buffers and pushes them onto a second bounded queue. This (the
-    # caller's) thread pulls completed windows from that queue and runs
-    # find_packets -- so while find_packets is busy on window N, the
-    # assembler thread is already reading+decimating window N+1 off disk,
-    # genuinely in parallel.
     win_q = queue.Queue(maxsize=2)
     WIN_SENTINEL = object()
     exc_holder2 = []
@@ -321,17 +230,6 @@ def find_packets_streaming(fn, window_sec=1.0, hop_sec=0.5, queue_maxsize=2,
     if not all_hits:
         return ([], np.concatenate(kept)) if return_iq else []
     all_hits.sort(reverse=True)
-    # O(n) spatial-bucket dedup instead of O(n^2) linear scan against the
-    # growing deduped list. Standard competitive-programming technique for
-    # "is there a point within radius R of this one" queries: bucket space
-    # into cells of size >= the radius, so any true neighbor must be in
-    # one of the 3x3 (here 2D: time x freq) surrounding cells -- never
-    # need to check points outside that neighborhood, since they're
-    # provably farther than the dedup radius. Same pattern already used
-    # for find_packets' region-list dedup (t_cell/f_cell below, mirrored).
-    # At 122 candidates (a real -10dB run) this was ~14,884 comparisons
-    # worst case; buckets bound it to a small constant per candidate
-    # regardless of n.
     t_cell = max(1, pkt_len); f_cell = 3000
     buckets = {}
     deduped = []
@@ -361,45 +259,14 @@ def find_packets(iq, floor_state=None):
     """Two-stage detection: cheap STFT energy screen for coarse (t,f)
     LOCALIZATION only (loose threshold, not a decision gate), then the
     sync-word matched filter runs only on those local windows.
-
-    Why: the matched filter alone, swept over the whole capture x every
-    freq bin, is correct but does a full-length filtfilt per freq bin
-    (~90 bins x full capture) -- most of that work is wasted since real
-    packets occupy a tiny fraction of (t,f) space. STFT energy is cheap
-    (~0.2s) and only needs to not miss real bursts, which a loose
-    threshold (-30dB, keep top-K=6 bins per frame so co-located packets
-    at different freqs aren't lost to a single-peak-per-frame pick)
-    guarantees in practice. The matched filter still does the real
-    accept/reject -- this stage only prunes where to look, never what to
-    accept. Confirmed zero recall loss vs the full sweep, ~5-7x faster.
-
-    floor_state: optional dict {'floor': array or None, 'n': int} for
-    carrying an EWMA noise-floor estimate ACROSS calls (used by the
-    windowed/streaming scan below). Without this, each windowed call's
-    np.median(energy_map, axis=0) is computed over only that window's own
-    STFT frames -- far fewer than the whole capture -- which measurably
-    produces a noisier, less stable floor and more false-positive region
-    picks (confirmed: naive per-window floor gave 13 clusters where the
-    whole-array floor gives 11, some of them false positives). Passing the
-    same dict across successive windowed calls lets the floor converge via
-    EWMA (alpha=0.3, first call seeds it directly) instead of each window
-    re-estimating from scratch -- this is what actually fixes the
-    false-positive gap while still never holding the whole capture in
-    memory, since the carried state is a handful of floats, not the
-    signal.
     """
-    nfft = PRESCREEN_NFFT; hop = max(1, cfg.STAY_HDR//8)
+    nfft = prescreen_nfft(); hop = max(1, cfg.STAY_HDR//8)
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         f_axis_raw, _, Zxx = sp.stft(iq, fs=cfg.FS, window='hann', nperseg=nfft,
                                      noverlap=nfft-hop, nfft=nfft, boundary=None)
     f_axis = np.fft.fftshift(f_axis_raw)
-    # |z|**2 without the round-trip sqrt: np.abs() takes a sqrt that the
-    # **2 immediately undoes, over the full [nfft, n_frames] STFT array.
-    # real**2 + imag**2 is the same quantity computed directly. Also skips
-    # the fftshift on Zxx itself (a full array copy) by shifting the axis
-    # once and reordering rows with the same permutation, then transposing.
     Zs = np.fft.fftshift(Zxx, axes=0)
     energy_map = (Zs.real*Zs.real + Zs.imag*Zs.imag).T   # [n_frames, nfft]
     n_frames = energy_map.shape[0]
@@ -419,12 +286,6 @@ def find_packets(iq, floor_state=None):
         floor_state['floor'] = floor
         floor_state['n'] = floor_state.get('n', 0) + 1
     thr = floor*(10**(-30/10.0))
-    # Work only on the in-band columns instead of copying the full
-    # [n_frames, nfft] array and zeroing/masking out-of-band columns in
-    # place. Out-of-band entries were forced to 0 and so could never be
-    # picked by the top-K anyway, so restricting up front is equivalent
-    # and does strictly less work (smaller copy, smaller argpartition).
-    # Indices are mapped back to full-spectrum bins via bidx.
     bidx = np.where(band)[0]
     eb = energy_map[:, bidx]
     eb = np.where(eb >= thr, eb, 0.0)
@@ -441,10 +302,6 @@ def find_packets(iq, floor_state=None):
                           *cfg.PRESCREEN_F_ROUND_HZ).tolist()))
     if not region_set:
         return []
-    # O(n) grid-bucket dedup (was O(n^2) any()-scan against a growing list --
-    # at ~1200 raw region points that quadratic scan alone cost ~2s). Snap to
-    # a coarse (time, freq) grid matching the merge radius used before
-    # (STAY_HDR//2, 800Hz) and keep the strongest-looking point per bucket.
     t_cell = max(1, cfg.STAY_HDR//2); f_cell = 800
     buckets = {}
     for t_, f_ in region_set:
@@ -453,31 +310,18 @@ def find_packets(iq, floor_state=None):
             buckets[key] = (t_, f_)
     regions = list(buckets.values())
 
-    sos = cached_butter(4, mf_lpf_hz()/(cfg.FS/2))
-    sos_dc = cached_butter(4, max(mf_lpf_hz(), cfg.FINE_SYNC_LPF_HZ)/(cfg.FS/2))
+    cut = mf_lpf_hz()
+    cut_dc = max(mf_lpf_hz(), cfg.FINE_SYNC_LPF_HZ)
+    D = region_decim()
     span = int(cfg.STAY_HDR*0.6)
     hits = []
-    # Region scan is embarrassingly parallel -- each region is an
-    # independent mix + filtfilt + MF-score on its own slice of iq. This
-    # only became worth threading once sosfiltfilt_ext started releasing
-    # the GIL (before that every worker serialized on it and threading
-    # measured zero gain); numpy's cos/sin ufuncs in _tone release the GIL
-    # too, so the whole per-region body now genuinely overlaps.
-    # Results are collected per-region and merged in deterministic region
-    # order afterwards, so output is identical to the serial version
-    # regardless of completion order.
     def _scan_region(args):
         rt, rf = args
         lo = max(0, int(rt - span//2)); hi = min(len(iq), int(rt + span))
         seg = iq[lo:hi]
-        # Near DC the prescreen places no regions (|f| < 2 kHz is skipped for
-        # the SDR's DC spike), so a hop there is only reachable from a region
-        # at the edge of that gap -- which takes the original wide filter.
-        # Narrow everywhere else. (Real capture: case077, header hop at
-        # 493 Hz, found only through the region at 2050 Hz.)
-        tuned = mix_and_filtfilt(sos_dc if abs(rf) < cfg.DC_GAP_REACH_HZ else sos,
-                                 seg, rf)
-        starts, ratio = _mf_scores(tuned)
+        tuned = mix_decimate_filtfilt(
+            seg, rf, cut_dc if abs(rf) < cfg.DC_GAP_REACH_HZ else cut, D)
+        starts, ratio = _mf_scores(tuned, D)
         if len(starts) == 0:
             return []
         strong = np.where(ratio > cfg.MF_THRESH)[0]
@@ -498,51 +342,63 @@ def find_packets(iq, floor_state=None):
     return clusters
 
 
-def _corr_surface(tuned, starts):
-    Z = (tuned[starts[:, None] + cfg.SYNC_OFF[None, :]] / cfg.SYNC_VEC[None, :]).T
-    out = np.empty((len(cfg._COARSE_HZ), cfg._NC, len(starts)))
-    for ci in range(len(cfg._COARSE_HZ)):
+def _corr_surface(tuned, starts, D=1, aliases=None):
+    """Sync-word correlation over the CFO grid at full-rate `starts`, for the
+    coarse-frequency aliases listed (default: all); tuned decimated by D
+    reads the nearest decimated sample, as _mf_scores does.
+    """
+    idx = starts[:, None] + cfg.SYNC_OFF[None, :]
+    if D > 1:
+        idx = np.clip(np.rint((idx - (D - 1)/2)/D).astype(int), 0, len(tuned) - 1)
+    Z = (tuned[idx] / cfg.SYNC_VEC[None, :]).T
+    aliases = range(len(cfg._COARSE_HZ)) if aliases is None else aliases
+    out = np.empty((len(aliases), cfg._NC, len(starts)))
+    for k, ci in enumerate(aliases):
         Zc = Z*cfg._COARSE_RAMP[ci][:, None]
-        out[ci] = np.abs(_ifft(Zc*cfg._SGN, n=cfg._NC, axis=0)*cfg._NC)**2
+        out[k] = np.abs(_ifft(Zc*cfg._SGN, n=cfg._NC, axis=0)*cfg._NC)**2
     return out
 
 
 def _fine_sync(iq, t0_coarse, hf_coarse, t_span=None, coarse_div=4, topM=6):
     if t_span is None:
         t_span = cfg.STAY_HDR
-    s_lo = max(0, t0_coarse - t_span)
-    s_hi = min(len(iq), t0_coarse + t_span + cfg.STAY_HDR)
+    guard = int(cfg.EDGE_GUARD_S*cfg.FS)
+    s_lo = max(0, t0_coarse - t_span - guard)
+    s_hi = min(len(iq), t0_coarse + t_span + cfg.STAY_HDR + guard)
     seg = iq[s_lo:s_hi]
     seg = seg/np.sqrt(np.mean(np.abs(seg)**2) + 1e-30)
-    # Narrow like the matched filter (it is a large part of the low-SNR
-    # gain: restoring 3000 Hz everywhere cut DR8 at -22 dB from 47/48 to
-    # 20/48), except next to the DC gap, where the candidate sits at the
-    # gap's edge and the hop may be up to 2 kHz away (case077: 2050 Hz
-    # candidate, 493 Hz hop).
     wide = abs(hf_coarse) < cfg.DC_GAP_REACH_HZ
-    sos = cached_butter(4, (max(mf_lpf_hz(), cfg.FINE_SYNC_LPF_HZ) if wide
-                            else mf_lpf_hz())/(cfg.FS/2))
-    tuned = mix_and_filtfilt(sos, seg, hf_coarse)
-    lim = len(tuned)-cfg.SYNC_OFF[-1]-1
+    cut = max(mf_lpf_hz(), cfg.FINE_SYNC_LPF_HZ) if wide else mf_lpf_hz()
+    D = region_decim() if cfg.FINE_SYNC_DECIM else 1
+    tuned = mix_decimate_filtfilt(seg, hf_coarse, cut, D)
+    g = -(-guard//D)
+    if g and len(tuned) > 4*g:
+        tuned[:g] = 0
+        tuned[-g:] = 0
+    lim = len(tuned)*D - cfg.SYNC_OFF[-1] - 1
     if lim <= 0:
         return (-1e18, hf_coarse, t0_coarse, 0.0)
 
     stA = np.arange(0, lim, max(1, cfg.SMBL//coarse_div))
     if len(stA) == 0:
         return (-1e18, hf_coarse, t0_coarse, 0.0)
-    S = _corr_surface(tuned, stA)
+    S = _corr_surface(tuned, stA, D, aliases=[cfg._COARSE_ONE])
     per_start = S.max(axis=(0, 1))
     top = np.argsort(-per_start)[:topM]
     half = max(1, cfg.SMBL//coarse_div)
+    q = max(D, (cfg.SMBL//64)//D*D)
     cand = set()
     for i in top:
         s0 = stA[i]
-        cand.update(range(max(0, s0-half), min(lim, s0+half)))
+        cand.update(range(max(0, s0-half), min(lim, s0+half), q))
     stB = np.array(sorted(cand))
     if len(stB) == 0:
         return (-1e18, hf_coarse, t0_coarse, 0.0)
-
-    S = _corr_surface(tuned, stB)
+    if q > D:
+        S = _corr_surface(tuned, stB, D, aliases=[cfg._COARSE_ONE])
+        b = int(stB[np.unravel_index(np.argmax(S), S.shape)[2]])
+        stB = np.arange(max(0, b - q + D), min(lim, b + q), D)
+    S = _corr_surface(tuned, stB, D)
     ci, fi, si = np.unravel_index(np.argmax(S), S.shape)
     cfo = cfg._CFO_GRID[fi]
     df = -cfo*cfg.BW/(2*np.pi)
@@ -551,20 +407,12 @@ def _fine_sync(iq, t0_coarse, hf_coarse, t_span=None, coarse_div=4, topM=6):
 
 
 def find_packets_windowed(iq, window_sec=0.1, hop_sec=0.05):
-    """Windowed variant of find_packets: scans iq in overlapping chunks
-    instead of one whole-array pass. window_sec must be large enough to
-    contain a full sync word (SYNC_OFF[-1]+1 samples, ~0.0635s at this
-    FS/SMBL) -- a window smaller than that can never see enough of the sync
-    pattern to correlate against it, regardless of threshold. Default
-    window=0.1s/hop=0.05s keeps 50% overlap (so a sync word straddling a
-    chunk boundary is still fully contained in the NEXT chunk) while
-    actually being big enough to work. Returns the same (score, t0, hf)
-    tuple list as find_packets, deduped across chunk boundaries.
+    """Windowed variant of find_packets: scans iq in overlapping chunks instead
+    of one whole-array pass.
     """
     min_window = max((cfg.SYNC_OFF[-1]+1)/cfg.FS, cfg.STAY_HDR*0.6/cfg.FS)
     if window_sec < min_window*1.3:
-        window_sec = min_window*1.3   # hard floor with margin, never silently
-                                        # accept a window too small to work
+        window_sec = min_window*1.3
     win_samp = int(window_sec*cfg.FS)
     hop_samp = int(hop_sec*cfg.FS)
     all_hits = []
@@ -580,9 +428,6 @@ def find_packets_windowed(iq, window_sec=0.1, hop_sec=0.05):
         return []
     all_hits.sort(reverse=True)
     pkt_len = cfg.STAY_HDR*cfg.HDR_COUNT + cfg.STAY_DATA*8
-    # Same O(n) spatial-bucket dedup as find_packets_streaming (see that
-    # function's comment for the full rationale) -- this was the same
-    # O(n^2) any()-over-growing-list pattern, same fix.
     t_cell = max(1, pkt_len); f_cell = 3000
     buckets = {}
     deduped = []

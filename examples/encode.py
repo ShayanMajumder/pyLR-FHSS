@@ -1,18 +1,7 @@
 #!/usr/bin/env python3
-"""Generate one LR-FHSS packet, save it, and decode it back.
-
-Edit the settings below, then run it:
-
-    python3 examples/encode.py
-
-The waveform is header replicas and payload fragments, each GMSK
-modulated, placed on the hop schedule the LFSR generates from HOP_SEQ_ID.
-The receiver rebuilds that same schedule from the decoded header, which
-is why nothing has to be told where the hops went.
-
-Writing a .wav here uses the same interleaved float32 layout the captures
-use, so the file can be fed straight to decode_recording.py.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""Generate one LR-FHSS packet, save it, and decode it back."""
 import os
 import struct
 
@@ -33,12 +22,8 @@ CARRIER_OFF_HZ = 0.0       # offset the packet from DC, as an SDR would
 NOISE = 1e-3               # AWGN amplitude; 0 for a clean waveform
 LEAD_SEC = 0.15            # silence before and after the burst
 OUT_WAV = os.path.join(HERE, 'generated_packet.wav')
-DECODE_BACK = True         # verify by decoding what we just built
-# -------------------------------------------------------------------------
+DECODE_BACK = True
 
-# The encoder reads its rates from config, so retune before generating:
-# this fixes the sample rate, symbol length and hop dwell times for both
-# directions at once.
 lrfhss.config.retune(BW_KHZ*1e3, hdr_count=HEADER_REPLICAS)
 
 iq, meta = lrfhss.encode(PAYLOAD, bw_khz=BW_KHZ, header_count=HEADER_REPLICAS,
@@ -78,7 +63,7 @@ print('  wrote          : %s' % OUT_WAV)
 
 if DECODE_BACK:
     print('\ndecoding it back')
-    packets = lrfhss.decode(buf, lrfhss.DecodeOptions(sensitive_retry=False))
+    packets = lrfhss.decode(buf, lrfhss.DecodeOptions())
     good = [p for p in packets if p['crc']]
     for p in good:
         print('  recovered      : %r' % bytes(p['bytes']))

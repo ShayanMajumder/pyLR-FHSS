@@ -1,4 +1,7 @@
-# Part of the lrfhss receiver package.
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+
+import functools
 
 import numpy as np
 import scipy.signal as sp
@@ -11,11 +14,22 @@ _BUTTER_CACHE = {}
 _ZI_CACHE = {}
 
 
+@functools.lru_cache(maxsize=32)
+def _hann(n):
+    w = np.hanning(n)
+    w.flags.writeable = False
+    return w
+
+
+def hann(n):
+    """np.hanning(n), cached: header and payload windows come in a handful
+    of lengths, and rebuilding one per FFT was ~3% of a low-SNR decode.
+    """
+    return _hann(int(n))
+
+
 def cached_butter(N, Wn, btype='low'):
-    """sp.butter() memoized. decode_header_at/decode_payload_at re-designed
-    the SAME filter on every call (thousands of calls on a low-SNR run);
-    the design itself (npp_polyval etc) showed up in profiles. Pure cache,
-    identical coefficients."""
+    """sp.butter() memoized."""
     key = (N, float(Wn), btype)
     sos = _BUTTER_CACHE.get(key)
     if sos is None:
@@ -27,15 +41,7 @@ def cached_butter(N, Wn, btype='low'):
 def fast_sosfiltfilt(sos, x):
     """Bit-exact drop-in for scipy.signal.sosfiltfilt on 1-D input, with
     sosfilt_zi(sos) memoized.
-
-    scipy recomputes sosfilt_zi(sos) -- a per-section linear solve -- on
-    EVERY sosfiltfilt call. On a -10dB 122-cluster run this path was
-    10,904 calls / 3.69s, the top numpy cost after the demod fix. The zi
-    depends only on `sos`, and this receiver uses a tiny fixed set of
-    filters, so it's cached. Everything else replicates scipy's own
-    sosfiltfilt source exactly (same odd-extension padding, same sosfilt C
-    kernel, same forward/reverse/trim sequence), so output is bit-exact --
-    validated against scipy directly, not assumed."""
+    """
     from scipy.signal import sosfilt, sosfilt_zi
     from scipy.signal._arraytools import odd_ext, axis_slice, axis_reverse
     sos = np.asarray(sos)
@@ -50,17 +56,8 @@ def fast_sosfiltfilt(sos, x):
     edge = ntaps*3
     x = np.asarray(x)
     if x.shape[-1] <= edge:
-        # too short for the default padlen -- defer to scipy's own
-        # validation/handling of the short-signal case
         return sp.sosfiltfilt(sos, x)
     if cfg._HAVE_VEXT_LOCAL and np.iscomplexobj(x) and x.ndim == 1:
-        # Full C++ path: odd-extension + both biquad passes + reversals +
-        # trim fused into one call. scipy's sosfilt kernel is C, but each
-        # sosfiltfilt call pays Python overhead for the padding build, zi
-        # scaling, two sosfilt invocations and two reversals -- 3464 calls
-        # / 1.42s on a windowed run, the largest single cost there.
-        # Validated bit-exact (max abs diff 0.0 vs scipy.sosfiltfilt over
-        # 200 randomized trials).
         return np.asarray(cfg._vext_local.sosfiltfilt_ext(
             np.ascontiguousarray(sos, dtype=np.float64),
             np.ascontiguousarray(x, dtype=np.complex128),
@@ -77,24 +74,20 @@ def fast_sosfiltfilt(sos, x):
     return y
 
 
-
-from collections import OrderedDict
-
 _TONE_LRU = OrderedDict()
-_TONE_LRU_CAP = 200   # see _tone's docstring: simulated against the real
+_TONE_LRU_CAP = 200
+# Also capped by size: at 3 MS/s (US915 DR5/DR6) one fine-sync tone is
+# 33 MB, and 200 of them filled the machine.
+_TONE_LRU_BYTES = 256*2**20
 
 
 _TONE_BLOCK = 512
 
 
 def _block_tone(w, length):
-    """exp(1j*w*n), n = 0..length-1, as one block of B phases times a
-    per-block rotation: exp(1j*w*(bB + i)) = exp(1j*w*bB)*exp(1j*w*i). One
-    complex multiply per sample instead of a cos and a sin; the two short
-    exps are exact, so the product agrees with direct evaluation to ~1e-15.
-    Since prescreen regions sit at their measured frequency (50 Hz steps
-    rather than 500), the tone cache below misses far more often, which
-    made per-sample trig the single biggest cost of detection."""
+    """exp(1j*w*n), n = 0..length-1, as one block of B phases times a per-block
+    rotation: exp(1j*w*(bB + i)) = exp(1j*w*bB)*exp(1j*w*i).
+    """
     B = _TONE_BLOCK
     nb = -(-length//B)
     base = np.exp(1j*w*np.arange(B))
@@ -103,32 +96,11 @@ def _block_tone(w, length):
 
 
 def _tone(freq_hz, length):
-    """exp(-2j*pi*freq_hz*n/FS) for n=0..length-1, via cos/sin written
-    directly into the output's real/imag views (0.325ms vs 0.600ms for
-    np.exp(1j*ph) at span length, 1.85x -- agrees with np.exp to ~7e-12,
-    verified to leave find_packets' cluster set unchanged).
-
-    LRU-cached, sized to the measured working set, NOT the earlier FIFO
-    attempt that was removed. That attempt failed because it was sized
-    off a single-SNR isolated measurement (776 calls, ~232 distinct rf)
-    and thrashed once the real (freq, length) key space -- 13 distinct
-    lengths, not just frequency -- was accounted for in the full
-    pipeline. Re-measured properly this time: at -10dB (122 clusters, the
-    regime that actually stresses this function), the real access
-    sequence has 5452 calls over 1320 distinct keys -- 75.8% reuse -- and
-    the reuse is CONCENTRATED (top 100 keys cover 51% of all calls), not
-    spread thin. Simulated LRU hit rate at several cap sizes against the
-    real captured sequence before choosing one: cap=200 gives 68.5% hits
-    at ~3MB (vs the 493MB an unbounded cache of all 1320 keys would cost
-    at this segment length). LRU (evicts least-recently-used), not FIFO
-    (evicts oldest regardless of reuse) -- this is the actual reason the
-    earlier cache thrashed: FIFO can evict a hot key while a cold one it
-    just inserted sits in the cache. Bookkeeping overhead measured at
-    ~0.0004ms/op, negligible against the ~0.325ms/call tone-generation
-    cost a hit avoids.
+    """exp(-2j*pi*freq_hz*n/FS) for n=0..length-1, via cos/sin written directly
+    into the output's real/imag views (0.325ms vs 0.600ms for np.exp(1j*ph)
+    at span length, 1.85x -- agrees with np.exp to ~7e-12, verified to leave
+    find_packets' cluster set unchanged).
     """
-    # FS is part of the key: after retune() to another rate, the same
-    # (frequency, length) is a different tone.
     key = (round(float(freq_hz), 1), int(length), float(cfg.FS))
     cached = _TONE_LRU.get(key)
     if cached is not None:
@@ -137,31 +109,29 @@ def _tone(freq_hz, length):
     t = _block_tone(-2.0*np.pi*float(freq_hz)/cfg.FS, int(length))
     _TONE_LRU[key] = t
     _TONE_LRU.move_to_end(key)
-    if len(_TONE_LRU) > _TONE_LRU_CAP:
+    while len(_TONE_LRU) > 1 and (
+            len(_TONE_LRU) > _TONE_LRU_CAP
+            or sum(v.nbytes for v in _TONE_LRU.values()) > _TONE_LRU_BYTES):
         _TONE_LRU.popitem(last=False)
     return t
 
 
-def mix_and_filtfilt(sos, seg, freq_hz):
-    """tuned = sosfiltfilt(sos, seg * exp(-2j*pi*freq_hz*n/FS)), fused.
-
-    The mixing tone and the mixed-signal product were each a full-length
-    complex temporary per call; find_packets' region loop alone builds
-    ~776 of them at ~23347 samples each (~18M complex exponentials/run),
-    and decode_header_at / try_thishdridx repeat the pattern (937 filtfilt
-    calls). The C++ path evaluates the tone per sample directly into the
-    filter's extension buffer, allocating neither temporary.
-
-    A fully-fused C++ version (mix_and_sosfiltfilt_ext, generating the
-    tone per sample inside the filter pass) was built and MEASURED SLOWER
-    and is deliberately not used: scalar std::cos/std::sin per sample cost
-    ~1.16 ms/call vs ~0.53 ms/call for numpy's vectorized complex exp
-    feeding sosfiltfilt_ext (windowed run regressed 5.2s -> 13.9s). numpy's
-    exp is SIMD; scalar libm trig cannot match it. The tone therefore stays
-    in numpy and only the filter runs in C++. The extension function is
-    left in place but unused, as a record of the negative result.
-
+def mix_decimate_filtfilt(seg, freq_hz, cutoff_hz, D):
+    """mix_and_filtfilt for a narrow output, D times cheaper: tune to baseband,
+    average blocks of D samples, then the same 4th-order Butterworth at
+    FS/D.
     """
+    if D <= 1:
+        return mix_and_filtfilt(cached_butter(4, cutoff_hz/(cfg.FS/2)), seg, freq_hz)
+    n = len(seg)//D*D
+    w = -2.0*np.pi*float(freq_hz)/cfg.FS
+    x = (np.ascontiguousarray(seg[:n]).reshape(-1, D) @ (np.exp(1j*w*np.arange(D))/D))
+    x *= np.exp(1j*(w*D)*np.arange(n//D))
+    return fast_sosfiltfilt(cached_butter(4, cutoff_hz/(cfg.FS/D/2)), x)
+
+
+def mix_and_filtfilt(sos, seg, freq_hz):
+    """tuned = sosfiltfilt(sos, seg * exp(-2j*pi*freq_hz*n/FS)), fused."""
     return fast_sosfiltfilt(sos, seg*_tone(freq_hz, len(seg)))
 
 

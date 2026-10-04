@@ -1,4 +1,5 @@
-# Part of the lrfhss receiver package.
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
 
 import numpy as np
 
@@ -6,23 +7,14 @@ from . import config as cfg
 
 
 def _parse_wav_header(fn):
-    """Minimal RIFF/WAVE header parser -- reads only the header chunks (a
-    few dozen to ~100 bytes), never the data payload. Returns
-    (n_channels, sample_rate, bits_per_sample, audio_format, data_offset,
-    data_size) so the caller can seek+fromfile individual chunks of the
-    data subchunk directly, instead of scipy.io.wavfile.read() which loads
-    the ENTIRE file into memory before any processing can start. On a
-    150MB+ capture that's a full extra read+allocate that gates every
-    downstream step on the whole file being resident -- streaming per-NB
-    chunk reads (see load_frontend) removes that gate and bounds peak
-    memory to one FFT-block's worth of raw samples instead of the whole
-    capture."""
+    """Minimal RIFF/WAVE header parser -- reads only the header chunks (a few
+    dozen to ~100 bytes), never the data payload.
+    """
     import struct
     with open(fn, 'rb') as f:
         riff = f.read(12)
         if riff[0:4] != b'RIFF' or riff[8:12] != b'WAVE':
             raise ValueError('not a RIFF/WAVE file: %s' % fn)
-        fmt = None
         data_offset = None
         data_size = None
         while True:
@@ -39,7 +31,7 @@ def _parse_wav_header(fn):
             elif cid == b'data':
                 data_offset = f.tell()
                 data_size = csize
-                break   # stop at the data chunk -- don't need anything after it
+                break
             else:
                 f.seek(csize + (csize % 2), 1)
         if data_offset is None:
@@ -52,14 +44,8 @@ def _parse_wav_header(fn):
 def _wav_to_raw_iq(fn):
     """Convert a WAV capture (IEEE-float, I/Q as 2 channels) directly to the
     raw interleaved float32 array load_frontend expects (a[0::2]=I,
-    a[1::2]=Q), in memory. Python's wave module can't even open float-format
-    WAV (format tag 3 -> 'unknown format' error), so this uses
-    scipy.io.wavfile instead.
-
-    Kept for non-streaming callers / small files; load_frontend's default
-    path no longer calls this for .wav (see _wav_chunk_reader below) --
-    reading the whole file up front is exactly the load-everything-at-once
-    pattern that should be avoided for large captures."""
+    a[1::2]=Q), in memory.
+    """
     from scipy.io import wavfile
     rate, data = wavfile.read(fn)
     if data.ndim != 2 or data.shape[1] != 2:
@@ -74,18 +60,7 @@ def _wav_to_raw_iq(fn):
 
 
 class _WavChunkReader:
-    """Streaming reader over a float32 2-channel WAV's data chunk. Exposes
-    the same slicing interface load_frontend's inner loop needs
-    (raw[lo*2:hi*2] on a flat interleaved I/Q view) without ever holding
-    more than one requested slice in memory. Complex128-index-style dtype
-    output matches what _wav_to_raw_iq / np.memmap('.bin') returned before,
-    so load_frontend's math is unchanged -- only where the bytes come from
-    changes.
-
-    Read pattern is: seek to the next window's byte offset, read it,
-    return it -- one persistent file handle, explicit os.lseek/os.read via
-    file positioning rather than reopening the file (np.fromfile(path,...)
-    per call) on every window."""
+    """Streaming reader over a float32 2-channel WAV's data chunk."""
     def __init__(self, fn):
         info = _parse_wav_header(fn)
         if info['n_channels'] != 2:
@@ -101,20 +76,15 @@ class _WavChunkReader:
         self.fn = fn
         self.data_offset = info['data_offset']
         self.n_samples_total = info['data_size'] // 4   # total float32 values (both channels interleaved)
-        self.shape = (self.n_samples_total,)   # mimic raw.shape[0] used by load_frontend
-        # NOTE: buffering=0 (unbuffered) measured ~0.049s PER open on this
-        # filesystem vs ~0.0002s buffered -- ~250x, and it showed up as
-        # 1.014s of _io.open in a 3.7s profile. We seek() explicitly before
-        # every read, so Python's buffer layer doesn't affect correctness;
-        # a large buffer just avoids the pathological unbuffered open cost
-        # and lets big sequential reads coalesce.
+        self.shape = (self.n_samples_total,)
         self._fh = open(fn, 'rb', buffering=1024*1024)
 
     def read_window(self, start, n):
-        """Seek to sample index `start` (in the interleaved float32 stream)
-        and read exactly `n` float32 values via explicit file positioning
+        """Seek to sample index `start` (in the interleaved float32 stream) and
+        read exactly `n` float32 values via explicit file positioning
         (os.lseek + os.read on the persistent handle), not a fresh
-        np.fromfile(path,...) open per call."""
+        np.fromfile(path,...) open per call.
+        """
         start = max(0, min(start, self.n_samples_total))
         n = max(0, min(n, self.n_samples_total - start))
         if n <= 0:
@@ -125,9 +95,6 @@ class _WavChunkReader:
         return np.frombuffer(raw_bytes, dtype=np.float32)
 
     def __getitem__(self, sl):
-        # load_frontend's non-prefetching call path (kept for the non-.wav
-        # memmap-compatible interface / callers that don't use the
-        # prefetch generator below).
         start = 0 if sl.start is None else sl.start
         stop = self.n_samples_total if sl.stop is None else sl.stop
         return self.read_window(start, stop - start)

@@ -1,10 +1,6 @@
-"""Shared fixtures.
-
-The suite is self-contained: most tests generate their own signal with
-the encoder, and the one real recording is bundled in examples/data. Nothing
-here depends on the full capture sweep, so everything runs anywhere and
-nothing is skipped.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""Shared fixtures."""
 import pathlib
 
 import pytest
@@ -18,11 +14,7 @@ DATA = ROOT / 'examples' / 'data'
 
 @pytest.fixture(autouse=True)
 def default_config():
-    """Every test starts from a known front end.
-
-    config is process-global and retune() mutates it, so without this a
-    test that retunes would silently change the meaning of the next one.
-    """
+    """Every test starts from a known front end."""
     lrfhss.config.retune(136_720, hdr_count=3)
     yield
     lrfhss.config.retune(136_720, hdr_count=3)

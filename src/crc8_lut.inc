@@ -1,3 +1,5 @@
+// Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+// SPDX-License-Identifier: MIT
 // Auto-generated from lrfhss_header._CRC8_LUT
 static const uint8_t CRC8_LUT[256] = {
     0,47,94,113,188,147,226,205,87,120,9,38,235,196,181,154,

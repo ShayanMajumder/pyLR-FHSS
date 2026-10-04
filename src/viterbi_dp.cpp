@@ -1,7 +1,5 @@
-// Part of the lrfhss_viterbi_ext pybind11 extension.
-// Split out of the former single-file viterbi_ext.cpp; the code below is
-// unchanged apart from the includes and linkage needed to compile
-// separately. See module.cpp for the module-level documentation.
+// Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+// SPDX-License-Identifier: MIT
 #include "viterbi_dp.hpp"
 
 DPResultMulti run_forward_dp_multistart(

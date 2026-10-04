@@ -1,14 +1,9 @@
-// Part of the lrfhss_viterbi_ext pybind11 extension.
-// Split out of the former single-file viterbi_ext.cpp; the code below is
-// unchanged apart from the includes and linkage needed to compile
-// separately. See module.cpp for the module-level documentation.
+// Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+// SPDX-License-Identifier: MIT
 #include "viterbi.hpp"
 #include "viterbi_dp.hpp"
 #include "crc.hpp"
 
-// ---------------------------------------------------------------------
-// viterbi_payload: 64-state, single start state (state 0), best end state.
-// ---------------------------------------------------------------------
 py::array_t<int> viterbi_payload(
     py::array_t<double, py::array::c_style | py::array::forcecast> cost_sym,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> sort_from,
@@ -38,14 +33,6 @@ py::array_t<int> viterbi_payload(
     return out;
 }
 
-// ---------------------------------------------------------------------
-// viterbi_header_multistart: 16-state, tries all `nstates` start states
-// (mirrors the Python for start_state in range(16) loop). Returns a
-// [nstates, nsyms] int array -- row k is the decoded bit sequence for
-// start_state=k, end_state=argmin(cost) for that run. Caller (Python)
-// still does the CRC8 check per row and stops at the first pass, exactly
-// as before -- only the DP inner loop moves to C++.
-// ---------------------------------------------------------------------
 py::array_t<int> viterbi_header_multistart(
     py::array_t<double, py::array::c_style | py::array::forcecast> cost_sym,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> sort_from,
@@ -77,30 +64,12 @@ py::array_t<int> viterbi_header_multistart(
     return out;
 }
 
-// ---------------------------------------------------------------------
-// viterbi_header_backward: mirrors _decode_header_backward -- runs the
-// REVERSE-direction trellis (predecessor lookup, i from n-1 down to 0)
-// for all `nstates` END states. rsort_from/inp/osy are the reverse
-// (predecessor) sorted tables, grouped by SUCCESSOR state exactly as
-// _RBR_SORT_* is in Python. Returns [nstates, nsyms] like multistart,
-// one row per end_state, with the traceback direction reversed to match
-// the Python backward decoder's forward-order bit assembly.
-// ---------------------------------------------------------------------
 py::array_t<int> viterbi_header_backward(
     py::array_t<double, py::array::c_style | py::array::forcecast> cost_sym,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> rsort_from,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> rsort_inp,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> rsort_osy)
 {
-    // NOT fused like viterbi_header_multistart above. That fusion is
-    // worth it there because forward multistart runs on EVERY grid point
-    // (528 times/cluster -- see decode_header_at's df/cfo sweep). Backward
-    // only runs as an opt-in fallback when forward finds nothing at all
-    // across the whole grid -- a rare path, not the hot one -- so fusing
-    // this too would add real risk (another full DP restructure to
-    // re-validate) for a win that rarely executes. Left as the original
-    // per-end-state loop; revisit if backward-path profiling ever shows
-    // otherwise.
     auto cs = cost_sym.unchecked<2>();
     int nsyms = (int)cs.shape(0);
     int nsym_out = (int)cs.shape(1);
@@ -150,22 +119,6 @@ py::array_t<int> viterbi_header_backward(
     return out;
 }
 
-// ---------------------------------------------------------------------
-// viterbi_payload_full: fused end-to-end payload decode. Takes the raw
-// deinterleaved soft array + CR straight from deinterleave_payload's
-// output, does quantize -> depuncture -> cost_sym -> 64-state Viterbi DP
-// -> traceback -> CRC16 check, all in one C++ call. Was previously 4-5
-// separate Python/numpy stages per call (quantize, depuncture loop for
-// punctured CRs, cost_sym build via np.stack, viterbi_payload call,
-// crc16 call) -- profiling showed viterbi_decode_payload's WRAPPER cost
-// (deinterleave_payload + crc16 + array shuffling) exceeded the DP
-// itself once the DP moved to C++ (0.898s cumulative vs 0.099s pure DP
-// on a real run). This collapses the whole function to one boundary
-// crossing. Bit-exact with lrfhss_decode.py's viterbi_decode_payload
-// (validated in ext/test_viterbi_ext.py).
-//
-// Returns: (info_bits[nsyms-16-6] or empty, match: bool) via a 2-tuple.
-// ---------------------------------------------------------------------
 py::tuple viterbi_payload_full(
     py::array_t<double, py::array::c_style | py::array::forcecast> deint_payload,
     int CR, double demod_soft_val_cap,
@@ -173,14 +126,6 @@ py::tuple viterbi_payload_full(
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> sort_inp,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> sort_osy)
 {
-    // GIL handling: pybind11 holds the GIL for the whole call by default,
-    // which serializes every worker thread in Python's ThreadPoolExecutor
-    // and is why threading measured ZERO speedup on this pipeline before.
-    // Raw pointers are taken while the GIL is held, then it's released for
-    // the pure-C++ compute (no Python object access inside), and
-    // reacquired implicitly on scope exit before the result arrays are
-    // built. This is what actually lets --workers N parallelize on a
-    // multi-core machine.
     const double* dp_ptr = deint_payload.data();
     int ndeint = (int)deint_payload.shape(0);
     const int64_t* sf = sort_from.data();
@@ -225,9 +170,6 @@ py::tuple viterbi_payload_full(
                     }
                 }
             }
-            // Stop at the last kept bit rounded up to a whole trellis step,
-            // not at the end of the padded period -- see the numpy version
-            // in lrfhss/phy/fec.py for why.
             int keep_len = (end + 2) / 3 * 3;
             mother.resize(keep_len);
         }

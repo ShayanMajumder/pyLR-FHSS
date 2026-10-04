@@ -1,43 +1,17 @@
-# Part of the lrfhss receiver package.
-"""Deciding which sync candidates are real packets.
-
-One physical packet shows up as several candidates -- its header replicas
-sit at different frequencies, and each can clear the matched-filter
-threshold on its own. Turning that candidate list into a packet list is
-where this receiver has historically gone wrong, so the rules live here
-rather than inline in the decode loop:
-
-  * Strongest evidence first. Candidates are decoded in order of the
-    REFINED correlation from acquisition, not the coarse cluster score.
-  * A confirmed packet suppresses its own replicas, by time proximity
-    (`find_duplicate`) and by predicted hop schedule (`ClusterPruner`).
-  * The payload CRC16 is the accept gate -- but it is only 16 bits, so a
-    garbage decode clears it roughly once in 65536 tries. Across a large
-    hypothesis search that happens, and because a confirmed packet
-    suppresses everything near it, ONE false pass can discard the real
-    packet. Both ordering rules above exist to make the real packet win
-    that race, not merely to save work.
-"""
+# Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
+# SPDX-License-Identifier: MIT
+"""Deciding which sync candidates are real packets."""
 import os
 
 from . import config as cfg
 from . import report
-from .payload import _packet_footprint, decode_payload_at
+from .payload import _packet_footprint, _packet_slots, decode_payload_at
 from .plotting import plot_packet_spectrogram
-from .quality import check_energy_length
+from .quality import check_energy_length, packet_snr_db
 
 
 def find_duplicate(results, t0):
-    """The already-confirmed packet this candidate is a replica of, if any.
-
-    Header replicas of ONE physical packet are always within
-    HDR_COUNT*STAY_HDR samples of each other in TIME -- a known constant,
-    no frequency prediction needed. Matching on predicted frequency (the
-    older approach, via _packet_footprint's LFSR re-prediction) missed real
-    duplicates whose measured frequency didn't match the prediction closely
-    enough. Time-only matching is reliable regardless of which replica
-    frequency either detection landed on.
-    """
+    """The already-confirmed packet this candidate is a replica of, if any."""
     for prev in results:
         if not prev['crc']:
             continue
@@ -47,17 +21,7 @@ def find_duplicate(results, t0):
 
 
 class ClusterPruner:
-    """Tracks, per cluster, what has been submitted / decoded / retired.
-
-    `submitted` and `retired` are deliberately separate. They used to be
-    one flag, which meant the predicted-hop retirement could never prune a
-    cluster sitting in the CURRENT batch -- and a batch is n_workers wide,
-    so on a machine with enough cores every cluster landed in one batch and
-    retirement pruned nothing. The duplicate replicas it was meant to drop
-    got decoded anyway, one cleared CRC16 by chance, and the real packet
-    was then discarded as its duplicate. That made the decode depend on
-    core count (case044: passed at 1/2/4 workers, failed at 8/14).
-    """
+    """Tracks, per cluster, what has been submitted / decoded / retired."""
 
     def __init__(self, n):
         self.submitted = [False]*n
@@ -79,12 +43,7 @@ class ClusterPruner:
             self.submitted[ci] = True
 
     def retire_predicted(self, clusters, footprint, keep):
-        """Retire clusters the confirmed packet's hop schedule accounts for.
-
-        Skips the candidate itself and anything already decoded or retired
-        -- but NOT merely-submitted clusters, which is the distinction that
-        makes this work on same-batch siblings.
-        """
+        """Retire clusters the confirmed packet's hop schedule accounts for."""
         t_lo, t_hi, freqs = footprint
         gone = []
         for cj in range(len(clusters)):
@@ -100,7 +59,8 @@ class ClusterPruner:
     def restore(self, clusters_idx):
         """Undo a retirement: the candidate that caused it failed its
         payload, so its siblings -- other locks on the same packet, often
-        better aligned in time -- still deserve their turn."""
+        better aligned in time -- still deserve their turn.
+        """
         for cj in clusters_idx:
             self.retired[cj] = False
             self.submitted[cj] = False
@@ -114,20 +74,7 @@ def _header_matches_known_config(hdr):
 
 def evaluate(iq, acq, results, clusters=None, pruner=None, ci=None,
              plot_spectrograms=False, plot_dir='.'):
-    """Decide one acquired candidate, decoding its payload if it survives.
-
-    Appends to `results` and returns the new entry, or returns None if the
-    candidate was rejected. `clusters`/`pruner`/`ci` enable hop-schedule
-    retirement; without them the candidate is still fully evaluated, just
-    with nothing to prune (the streaming path has no global cluster list).
-
-    NOTE: a correlation-score reject gate used to sit before the energy
-    check (fcorr < 60.0). It was removed: it ran AFTER header CRC8 already
-    passed, and CRC8 is far stronger evidence than a raw correlation
-    heuristic -- confirmed on a real recording where two CRC-valid,
-    payload-CRC16-passing packets both scored fcorr in the 27-38 range and
-    were being silently discarded before ever reaching payload decode.
-    """
+    """Decide one acquired candidate, decoding its payload if it survives."""
     hdr = acq['hdr']
     if hdr is None:
         return None
@@ -153,10 +100,6 @@ def evaluate(iq, acq, results, clusters=None, pruner=None, ci=None,
     payload_bytes, crc_ok = decode_payload_at(iq, hdr, acq['hwin'], acq['hf_precise'])
     report.payload(crc_ok, payload_bytes)
     if not crc_ok and retired_now:
-        # Retirement was provisional on this packet decoding. It didn't --
-        # typically a lock placed badly in time -- so give the other locks
-        # on the same packet their turn; which one is decided first then
-        # stops deciding whether the packet is found at all.
         pruner.restore(retired_now)
 
     if crc_ok:
@@ -169,7 +112,12 @@ def evaluate(iq, acq, results, clusters=None, pruner=None, ci=None,
             if saved:
                 report.plot_written(saved)
 
+    snr_db = slots = None
+    if crc_ok:
+        slots = _packet_slots(iq, hdr, acq['hwin'], acq['hf_precise'])
+        snr_db = packet_snr_db(iq, slots) if slots else None
     entry = dict(idx=len(results), t0=acq['fstart'], corr=acq['fcorr'],
-                 header=hdr, bytes=payload_bytes, crc=crc_ok, footprint=footprint)
+                 header=hdr, bytes=payload_bytes, crc=crc_ok, footprint=footprint,
+                 snr_db=snr_db, slots=slots)
     results.append(entry)
     return entry
