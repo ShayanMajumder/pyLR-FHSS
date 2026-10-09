@@ -1,0 +1,11 @@
+# The sdist must carry everything needed to compile lrfhss._viterbi_ext:
+# setuptools picks up the .cpp sources listed in setup.py, but not the
+# headers and lookup tables they include.
+graft src
+include CHANGELOG.md
+
+# Tests and the one recording they read, so the sdist can be verified.
+include tests/*.py
+include examples/data/capture_39kHz_hdr3.wav
+
+global-exclude *.so *.pyd *.o *.obj *.py[cod] __pycache__

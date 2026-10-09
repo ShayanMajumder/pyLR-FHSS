@@ -1,6 +1,13 @@
 # Copyright (c) 2026 Shayan Majumder <shayan.majumder2@gmail.com>
 # SPDX-License-Identifier: MIT
 """LR-FHSS blind receiver."""
+from importlib.metadata import PackageNotFoundError, version as _version
+
+try:
+    __version__ = _version('lrfhss')
+except PackageNotFoundError:     # a source tree that was never pip-installed
+    __version__ = '0.0.0+unknown'
+
 from . import config
 from .config import datarate, retune_dr
 from .detect import find_packets, find_packets_windowed

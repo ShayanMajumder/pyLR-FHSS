@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # Errors only (syntax errors, undefined names), not style.
+      - run: pipx run ruff check --select E9,F63,F7,F82 --output-format github lrfhss tests examples setup.py
+
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+    env:
+      # Fail if the C++ core does not compile, instead of quietly testing
+      # the numpy fallback (tests/test_build.py checks it is loaded).
+      LRFHSS_REQUIRE_EXT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install ".[test]"
+      # The pytest entry point, not `python -m pytest`, so the installed
+      # package is imported rather than the uncompiled source tree.
+      - run: pytest -q
+
+  fallback:
+    name: Numpy fallback (no C++ core)
+    runs-on: ubuntu-latest
+    env:
+      LRFHSS_NO_EXT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ".[test]"
+      - run: python -c "import lrfhss, sys; sys.exit(lrfhss.config._HAVE_VEXT_LOCAL)"
+      - run: pytest -q
+
+  oldest-deps:
+    name: Oldest supported numpy and scipy
+    runs-on: ubuntu-latest
+    env:
+      LRFHSS_REQUIRE_EXT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      # Keep these pins equal to the lower bounds in pyproject.toml.
+      - run: python -m pip install ".[test]" "numpy==1.22.4" "scipy==1.9.3"
+      - run: pytest -q
+
+  package:
+    name: Build and check the distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      # Builds the sdist, then the wheel from that sdist, so a file
+      # missing from MANIFEST.in breaks this job rather than a user install.
+      - run: python -m build
+        env:
+          LRFHSS_REQUIRE_EXT: "1"
+      - run: python -m twine check --strict dist/*

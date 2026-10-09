@@ -1,0 +1,127 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds the sdist and wheels, publishes them to PyPI
+# and creates a GitHub release. Running the workflow by hand (Actions tab,
+# "Run workflow") does the same build and publishes to TestPyPI instead,
+# as a dry run. Both use PyPI trusted publishing, so no API token is stored.
+# One-time setup: a trusted publisher for this workflow on PyPI (environment
+# "pypi") and on TestPyPI (environment "testpypi"), and GitHub environments
+# with those two names.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-version:
+    name: Tag matches pyproject.toml
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Compare versions
+        shell: python
+        run: |
+          import os, sys, tomllib
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              sys.exit(f"Tag {tag} does not match the version in pyproject.toml ({version}).")
+          print(f"Releasing {version}")
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build --sdist
+      - run: python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+
+  wheels:
+    name: Wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux x86_64 and aarch64, macOS Intel and Apple silicon, Windows x64.
+        # Build selection, the extension requirement and the wheel tests are
+        # configured under [tool.cibuildwheel] in pyproject.toml.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pypa/cibuildwheel@v4.3.0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish-testpypi:
+    name: Publish to TestPyPI (dry run)
+    if: github.event_name == 'workflow_dispatch'
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/lrfhss
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'push'
+    needs: [check-version, sdist, wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/lrfhss
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true

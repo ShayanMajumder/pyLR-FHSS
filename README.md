@@ -1,5 +1,10 @@
 # PyLR-FHSS
 
+[![CI](https://github.com/ShayanMajumder/LR-FHSS/actions/workflows/ci.yml/badge.svg)](https://github.com/ShayanMajumder/LR-FHSS/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/lrfhss)](https://pypi.org/project/lrfhss/)
+[![Python](https://img.shields.io/pypi/pyversions/lrfhss)](https://pypi.org/project/lrfhss/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/ShayanMajumder/LR-FHSS/blob/main/LICENSE)
+
 A blind LR-FHSS receiver. Given raw IQ, it finds packets without being told
 where they are: matched-filter sync search, header decode, then the
 LFSR-predicted hop schedule to gather and decode the payload.
@@ -35,25 +40,35 @@ script.
 
 ## Install
 
-Python 3.9+ and a C++ compiler:
+Python 3.10+:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .              # add ".[test]" for pytest, ".[plots]" for matplotlib
+pip install lrfhss            # or "lrfhss[plots]" for the spectrogram plots
 ```
 
-That also compiles `src/*.cpp` into `lrfhss._viterbi_ext`, which the hot
-paths use automatically. It is an accelerator, not a requirement: without it
-everything still runs on numpy, bit-for-bit identical, just several times
-slower. The fallback is silent, so to check:
+Wheels for Linux, macOS and Windows include the compiled core
+(`lrfhss._viterbi_ext`), which the hot paths use automatically. To work on
+the code instead, install from a clone, which needs a C++ compiler:
+
+```bash
+git clone https://github.com/ShayanMajumder/LR-FHSS.git
+cd LR-FHSS
+python3 -m venv venv
+source venv/bin/activate
+pip install -e ".[test]"      # add ",plots" for matplotlib
+```
+
+The compiled core is an accelerator, not a requirement: if it cannot be
+built, the install still succeeds and everything runs on numpy, bit-for-bit
+identical, just several times slower (`LRFHSS_NO_EXT=1` skips the build on
+purpose). The fallback is silent, so to check:
 
 ```bash
 python3 -c "import lrfhss; print(lrfhss.config._HAVE_VEXT_LOCAL)"
 ```
 
 Live SDR reception additionally needs SoapySDR, which is a system package
-rather than a pip one -- see [`examples/arduino/`](examples/arduino) and
+rather than a pip one -- see [`examples/arduino/`](https://github.com/ShayanMajumder/LR-FHSS/tree/main/examples/arduino) and
 `examples/live_receive.py`.
 
 ## Decode a capture
@@ -101,17 +116,18 @@ python3 examples/live_receive.py       # decode off an SDR, live
 ```
 
 Each is a flat script: edit the settings block at the top and run it.
-[`examples/arduino/`](examples/arduino) has two transmitter sketches, for an
+[`examples/arduino/`](https://github.com/ShayanMajumder/LR-FHSS/tree/main/examples/arduino) has two transmitter sketches, for an
 STM32 with an SX1262 or an LR1120, to give `live_receive.py` something to
 hear.
 
 ## Tests
 
 ```bash
-pytest              # 97 tests, ~50 s
+pytest              # 99 tests, ~45 s
 ```
 
-Self-contained: nothing is skipped and nothing needs external data.
+Self-contained: nothing is skipped and nothing needs external data. CI runs
+them on Linux, macOS and Windows for every push and pull request.
 
 ## Layout
 
@@ -146,6 +162,6 @@ at Heriot-Watt University for supporting this work, and to
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](https://github.com/ShayanMajumder/LR-FHSS/blob/main/LICENSE).
 
 Shayan Majumder <shayan.majumder2@gmail.com>

@@ -2,6 +2,7 @@
 # Kept locally, not part of this repo
 python-softlora/
 simulations/
+RELEASING.md
 
 # ---- Virtual environments -----------------------------------------------
 venv/
