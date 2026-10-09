@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-09
+
+- Citation for the Zenodo record (doi: 10.5281/zenodo.23271166) in the README.
+
 ## [1.0.0] - 2026-10-09
 
 First public release.
@@ -19,5 +23,6 @@ First public release.
 - Optional C++ core (`lrfhss._viterbi_ext`), bit-exact with the numpy
   implementation, shipped in the binary wheels.
 
-[Unreleased]: https://github.com/ShayanMajumder/LR-FHSS/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/ShayanMajumder/LR-FHSS/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/ShayanMajumder/LR-FHSS/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/ShayanMajumder/LR-FHSS/releases/tag/v1.0.0

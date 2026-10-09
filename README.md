@@ -165,3 +165,23 @@ at Heriot-Watt University for supporting this work, and to
 MIT, see [LICENSE](https://github.com/ShayanMajumder/LR-FHSS/blob/main/LICENSE).
 
 Shayan Majumder <shayan.majumder2@gmail.com>
+
+## Citation
+
+If you use PyLR-FHSS in your research, please cite:
+
+> S. Majumder, H. Sayed, G. Goussetis, and S. N. Daskalakis, "Open-Source
+> Python Implementation of LR-FHSS for Ubiquitous Space-IoT Connectivity,"
+> Oct. 09, 2026, Zenodo. doi: [10.5281/zenodo.23271166](https://doi.org/10.5281/zenodo.23271166).
+
+```bibtex
+@misc{majumder2026pylrfhss,
+  author    = {Majumder, Shayan and Sayed, Hamza and Goussetis, George and Daskalakis, Spyridon N.},
+  title     = {{Open-Source Python Implementation of LR-FHSS for Ubiquitous Space-IoT Connectivity}},
+  publisher = {Zenodo},
+  year      = {2026},
+  month     = oct,
+  doi       = {10.5281/zenodo.23271166},
+  url       = {https://doi.org/10.5281/zenodo.23271166}
+}
+```
