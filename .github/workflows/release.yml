@@ -64,7 +64,7 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-15-intel, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: pypa/cibuildwheel@v4.3.0
+      - uses: pypa/cibuildwheel@v4.3.5
       - uses: actions/upload-artifact@v7
         with:
           name: dist-wheels-${{ matrix.os }}
